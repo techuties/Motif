@@ -1,0 +1,28 @@
+[project]
+name = "motif"
+version = "1.0.0"
+description = "Cross-platform mouse and keyboard recorder with a visual editor"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.6.0",
+    "pynput>=1.7.7",
+    "mss>=9.0.0",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+motif = "motif.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["motif*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
