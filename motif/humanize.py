@@ -6,7 +6,14 @@ import math
 import random
 from typing import Iterable
 
-from motif.models import HumanizeSettings, PathStyle
+from motif.models import (
+    WALK_MIN_POINTS,
+    Event,
+    EventType,
+    HumanizeSettings,
+    PathStyle,
+    is_snap_path,
+)
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -109,10 +116,8 @@ def generate_path(
         wander *= 1.7
     c1, c2 = _control_points(start, end, rng, wander)
 
-    overshoot = (
-        settings.enabled
-        and style == PathStyle.OVERSHOOT.value
-        or (settings.enabled and rng.random() < settings.overshoot_chance)
+    overshoot = settings.enabled and (
+        style == PathStyle.OVERSHOOT.value or rng.random() < settings.overshoot_chance
     )
     target = end
     if overshoot and dist > 40:
@@ -139,6 +144,48 @@ def generate_path(
     return points
 
 
+def playback_speed(settings: HumanizeSettings) -> float:
+    return max(float(settings.speed), 0.05)
+
+
+def scale_ms(base: int | float, settings: HumanizeSettings) -> int:
+    """Scale a recorded duration by playback speed. 1.0× is unchanged."""
+    return max(0, int(round(float(base) / playback_speed(settings))))
+
+
+def prefer_recorded_path(settings: HumanizeSettings, event: Event) -> bool:
+    """True when Replay should walk the take's polyline (TinyTask / JitBit).
+
+    A MOVE with three or more samples is the recorded path. Precise walks it
+    too — teleport is only Path style snap. Two-point hops interpolate instead.
+    """
+    if is_snap_path(settings, event):
+        return False
+    return len(event.points) >= WALK_MIN_POINTS
+
+
+def precise_travel_ms(event: Event) -> int:
+    """Single wait before a Precise hop: stored travel_ms, else last point t_ms."""
+    if event.travel_ms is not None:
+        return max(0, int(event.travel_ms))
+    if event.type_enum() == EventType.MOVE and event.points:
+        return max(0, int(event.points[-1].get("t_ms") or 0))
+    return 0
+
+
+def event_wait_ms(
+    delay_ms: int,
+    settings: HumanizeSettings,
+    rng: random.Random | None = None,
+) -> int:
+    """Pause before an event: recorded delay, optional humanize jitter, then speed."""
+    if delay_ms <= 0:
+        return 0
+    if settings.enabled:
+        return vary_ms(delay_ms, int(delay_ms * settings.timing_jitter), settings, rng)
+    return scale_ms(delay_ms, settings)
+
+
 def travel_ms(
     x0: int,
     y0: int,
@@ -149,10 +196,10 @@ def travel_ms(
     rng: random.Random | None = None,
 ) -> int:
     if override_ms is not None:
-        return max(0, override_ms)
+        return scale_ms(max(0, override_ms), settings)
     dist = distance(x0, y0, x1, y1)
     if not settings.enabled:
-        return max(8, int(dist * 2))
+        return scale_ms(max(8, int(dist * 2)), settings)
     base = fitts_time_ms(
         dist,
         settings.target_width_px,
@@ -162,7 +209,7 @@ def travel_ms(
         settings.max_travel_ms,
     )
     noise = jittered(0, base * settings.timing_jitter, rng)
-    scaled = (base + noise) / max(settings.speed, 0.05)
+    scaled = (base + noise) / playback_speed(settings)
     return int(_clamp(scaled, 1, settings.max_travel_ms * 2))
 
 
@@ -188,8 +235,8 @@ def step_delays_ms(total_ms: int, count: int, rng: random.Random | None = None) 
 
 def vary_ms(base: int, spread: int, settings: HumanizeSettings, rng: random.Random | None = None) -> int:
     if not settings.enabled or spread <= 0:
-        return max(0, int(base / max(settings.speed, 0.05)))
-    value = jittered(base, spread, rng) / max(settings.speed, 0.05)
+        return scale_ms(base, settings)
+    value = jittered(base, spread, rng) / playback_speed(settings)
     return max(0, int(round(value)))
 
 

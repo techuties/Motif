@@ -1,3 +1,4 @@
+# Runtime pins; install with: python3 start.py setup
 PySide6>=6.6.0
 pynput>=1.7.7
 mss>=9.0.0

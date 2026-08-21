@@ -1,4 +1,4 @@
-"""Replay a script with humanized motion, loops, and pixel waits."""
+"""Replay a script at recorded timing, with optional humanize, loops, and pixel waits."""
 
 from __future__ import annotations
 
@@ -10,9 +10,35 @@ from threading import Event as Flag
 from pynput.keyboard import Controller as KeyController
 from pynput.mouse import Button, Controller as MouseController
 
-from motif.humanize import generate_path, gauss_offset, replay_recorded_points, step_delays_ms, travel_ms, vary_ms
+from motif.humanize import (
+    distance,
+    event_wait_ms,
+    generate_path,
+    gauss_offset,
+    prefer_recorded_path,
+    precise_travel_ms,
+    replay_recorded_points,
+    scale_ms,
+    step_delays_ms,
+    travel_ms,
+    vary_ms,
+)
 from motif.keys import name_to_key
-from motif.models import Event, EventType, PathStyle, PlayMode, Script, screen_pos
+from motif.macos import activate_app, post_space_switch
+from motif.models import (
+    FINAL_SWIPE_SETTLE_MS,
+    SPACE_SETTLE_MS,
+    Event,
+    EventType,
+    PathStyle,
+    PlayMode,
+    Script,
+    direction_from_delta,
+    is_snap_path,
+    parse_ctrl_arrow,
+    screen_pos,
+    should_auto_align,
+)
 from motif.screen import grab_pixel, wait_for_pixel, wait_for_pixel_change
 
 BUTTONS = {
@@ -20,6 +46,18 @@ BUTTONS = {
     "right": Button.right,
     "middle": Button.middle,
 }
+
+
+def click_release_follows(event: Event, following: list[Event]) -> bool:
+    """True when a matching button-up is recorded after this press (skip notes/waits)."""
+    if event.type_enum() != EventType.CLICK or not event.pressed:
+        return False
+    for nxt in following:
+        kind = nxt.type_enum()
+        if kind in (EventType.COMMENT, EventType.WAIT):
+            continue
+        return kind == EventType.CLICK and not nxt.pressed and nxt.button == event.button
+    return False
 
 
 class Player:
@@ -31,9 +69,26 @@ class Player:
         self.busy = False
         self.cycle = 0
         self.index = -1
+        self._held_buttons: set = set()
+        self._held_keys: set = set()
 
     def request_stop(self) -> None:
         self.stop_flag.set()
+        self._release_held()
+
+    def _release_held(self) -> None:
+        for button in list(self._held_buttons):
+            try:
+                self.mouse.release(button)
+            except Exception:
+                pass
+        self._held_buttons.clear()
+        for key in list(self._held_keys):
+            try:
+                self.keyboard.release(key)
+            except Exception:
+                pass
+        self._held_keys.clear()
 
     def _sleep(self, ms: int) -> bool:
         if ms <= 0:
@@ -64,17 +119,31 @@ class Player:
         sx, sy = self._abs(script, x, y, cursor0)
         cx, cy = self._cursor()
         settings = script.humanize
-        style = event.path or (settings.path if settings.enabled else PathStyle.LINEAR.value)
-        if style == PathStyle.RECORDED.value and event.points:
+        # Snap is the only teleport. Default Precise/Natural walk the take.
+        if is_snap_path(settings, event):
+            hop = precise_travel_ms(event)
+            if hop and not self._sleep(scale_ms(hop, settings)):
+                return False
+            self.mouse.position = (sx, sy)
+            return True
+        if prefer_recorded_path(settings, event):
             jitter = settings.jitter_px if settings.enabled else 0.0
             for px, py, wait in replay_recorded_points(event.points, jitter, rng):
                 ax, ay = self._abs(script, px, py, cursor0)
                 self.mouse.position = (ax, ay)
-                if not self._sleep(max(1, int(wait / max(settings.speed, 0.05)))):
+                if not self._sleep(scale_ms(wait, settings)):
                     return False
             self.mouse.position = (sx, sy)
             return True
 
+        if distance(cx, cy, sx, sy) < 1.5:
+            self.mouse.position = (sx, sy)
+            return True
+
+        # Two-point / empty path: interpolate so Replay is never a silent hop.
+        style = event.path or settings.path
+        if style in {PathStyle.RECORDED.value, PathStyle.SNAP.value}:
+            style = PathStyle.LINEAR.value
         path = generate_path(cx, cy, sx, sy, settings, style, rng)
         total = travel_ms(cx, cy, sx, sy, settings, event.travel_ms, rng)
         delays = step_delays_ms(total, len(path), rng)
@@ -85,13 +154,23 @@ class Player:
         self.mouse.position = (sx, sy)
         return True
 
-    def _play_event(self, script: Script, event: Event, rng: random.Random, cursor0: tuple[int, int]) -> bool:
+    def _park(self, script: Script, rng: random.Random, cursor0: tuple[int, int], name: str) -> bool:
+        park = Event(type=EventType.GO_ORIGIN.value, name=name)
+        return self._move_to(script, 0, 0, park, rng, cursor0)
+
+    def _play_event(
+        self,
+        script: Script,
+        event: Event,
+        rng: random.Random,
+        cursor0: tuple[int, int],
+        following: list[Event] | None = None,
+    ) -> bool:
         settings = script.humanize
         kind = event.type_enum()
-        if event.delay_ms:
-            extra = vary_ms(event.delay_ms, int(event.delay_ms * settings.timing_jitter), settings, rng)
-            if not self._sleep(extra if settings.enabled else event.delay_ms):
-                return False
+        wait = event_wait_ms(event.delay_ms, settings, rng)
+        if wait and not self._sleep(wait):
+            return False
 
         if kind == EventType.COMMENT:
             return True
@@ -109,23 +188,32 @@ class Player:
             ox, oy = gauss_offset(settings.click_offset_px, rng) if settings.enabled else (0, 0)
             if not self._move_to(script, event.x + ox, event.y + oy, event, rng, cursor0):
                 return False
-            dwell = vary_ms(settings.dwell_before_click_ms, settings.dwell_jitter_ms, settings, rng)
-            if not self._sleep(dwell):
-                return False
+            if settings.enabled:
+                dwell = vary_ms(settings.dwell_before_click_ms, settings.dwell_jitter_ms, settings, rng)
+                if dwell and not self._sleep(dwell):
+                    return False
             button = BUTTONS.get(event.button, Button.left)
-            hold = event.duration_ms
-            if hold is None:
+            hold: int | None
+            if event.duration_ms is not None:
+                hold = event_wait_ms(event.duration_ms, settings, rng)
+            elif settings.enabled:
                 hold = vary_ms(settings.click_hold_ms, settings.click_hold_jitter_ms, settings, rng)
+            else:
+                hold = None
             if event.pressed:
                 self.mouse.press(button)
-                if event.duration_ms is not None or settings.enabled:
+                self._held_buttons.add(button)
+                if hold is not None:
                     if not self._sleep(hold):
                         self.mouse.release(button)
+                        self._held_buttons.discard(button)
                         return False
-                    # Pairing: if the next recorded event is the matching release, we still
-                    # release here only when this click is stored as a full tap.
+                if event.duration_ms is not None or not click_release_follows(event, following or []):
+                    self.mouse.release(button)
+                    self._held_buttons.discard(button)
             else:
                 self.mouse.release(button)
+                self._held_buttons.discard(button)
             return True
 
         if kind == EventType.SCROLL:
@@ -134,19 +222,42 @@ class Player:
             self.mouse.scroll(event.dx, event.dy)
             return True
 
+        if kind == EventType.SWIPE:
+            inferred = "inferred" in (event.notes or "").lower()
+            activated = False
+            if event.bundle_id or event.app:
+                activated = activate_app(event.bundle_id, event.app)
+            if not activated:
+                way = event.direction or direction_from_delta(event.dx, event.dy) or ""
+                if way or parse_ctrl_arrow(event.key):
+                    post_space_switch(way or "right", self.keyboard, key=event.key, inferred=inferred)
+            # Space animation is ~0.4–0.6s. Wait it out even when delay_ms was 0.
+            # Non-swipe events keep their recorded timing only. Delay 0 never drops
+            # a swipe — consecutive end swipes each post and settle.
+            settle = SPACE_SETTLE_MS
+            if following is not None and not any(nxt.type_enum() == EventType.SWIPE for nxt in following):
+                settle += FINAL_SWIPE_SETTLE_MS
+            if not self._sleep(settle):
+                return False
+            return True
+
         if kind in (EventType.KEY_DOWN, EventType.KEY_UP):
             key = name_to_key(event.key)
             if key is None:
                 return True
             if kind == EventType.KEY_DOWN:
                 self.keyboard.press(key)
+                self._held_keys.add(key)
                 if event.duration_ms:
-                    if not self._sleep(event.duration_ms):
+                    if not self._sleep(event_wait_ms(event.duration_ms, settings, rng)):
                         self.keyboard.release(key)
+                        self._held_keys.discard(key)
                         return False
                     self.keyboard.release(key)
+                    self._held_keys.discard(key)
             else:
                 self.keyboard.release(key)
+                self._held_keys.discard(key)
             return True
 
         if kind == EventType.WAIT_PIXEL:
@@ -197,9 +308,8 @@ class Player:
                 cursor0 = self._cursor()
                 if script.play_mode == PlayMode.FROM_ORIGIN.value:
                     cursor0 = (script.origin_x, script.origin_y)
-                if script.loop.park_before_cycle and script.origin_set:
-                    park = Event(type=EventType.GO_ORIGIN.value, name="Park")
-                    if not self._move_to(script, 0, 0, park, rng, cursor0):
+                if should_auto_align(script, returning=False):
+                    if not self._park(script, rng, cursor0, "Park"):
                         return "stopped"
                     if script.play_mode == PlayMode.FROM_CURSOR.value:
                         cursor0 = self._cursor()
@@ -210,17 +320,17 @@ class Player:
                     self.index = i
                     if self.on_progress:
                         self.on_progress(self.cycle, i, event.display_name())
-                    if not self._play_event(script, event, rng, cursor0):
+                    if not self._play_event(script, event, rng, cursor0, events[i + 1 :]):
                         return "stopped" if self.stop_flag.is_set() else "failed"
-                if script.loop.return_to_origin and script.origin_set:
-                    park = Event(type=EventType.GO_ORIGIN.value, name="Return")
-                    if not self._move_to(script, 0, 0, park, rng, cursor0):
+                if should_auto_align(script, returning=True):
+                    if not self._park(script, rng, cursor0, "Return"):
                         return "stopped"
                 if not forever and self.cycle >= loops:
                     break
-                if not self._sleep(script.loop.gap_ms):
+                if not self._sleep(scale_ms(script.loop.gap_ms, script.humanize)):
                     return "stopped"
             return "done"
         finally:
+            self._release_held()
             self.busy = False
             self.index = -1

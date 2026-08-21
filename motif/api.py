@@ -12,6 +12,20 @@ from urllib.parse import urlparse
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 7842
+_MAX_BODY = 1_000_000
+
+
+def _origin_allowed(origin: str, host: str, port: int) -> bool:
+    """Allow non-browser clients (no Origin) and same-host browser pages only."""
+    origin = origin.strip().rstrip("/")
+    if not origin:
+        return True
+    allowed = {
+        f"http://{host}:{port}",
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+    }
+    return origin in allowed
 
 
 class MotifAPI:
@@ -27,6 +41,10 @@ class MotifAPI:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
+    @property
+    def running(self) -> bool:
+        return self._server is not None
+
     def start(self) -> None:
         if self._server:
             return
@@ -41,34 +59,40 @@ class MotifAPI:
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(raw)
+
+            def _csrf_ok(self) -> bool:
+                return _origin_allowed(self.headers.get("Origin") or "", api.host, api.port)
 
             def _body(self) -> dict[str, Any]:
                 length = int(self.headers.get("Content-Length") or 0)
                 if length <= 0:
                     return {}
+                if length > _MAX_BODY:
+                    raise ValueError("request body too large")
                 raw = self.rfile.read(length)
                 if not raw:
                     return {}
                 data = json.loads(raw.decode("utf-8"))
                 return data if isinstance(data, dict) else {}
 
-            def do_OPTIONS(self) -> None:  # noqa: N802
-                self.send_response(204)
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type")
-                self.end_headers()
-
             def do_GET(self) -> None:  # noqa: N802
-                path = urlparse(self.path).path
-                self._dispatch("GET", path, {})
+                if not self._csrf_ok():
+                    self._json(403, {"error": "origin not allowed"})
+                    return
+                self._dispatch("GET", urlparse(self.path).path, {})
 
             def do_POST(self) -> None:  # noqa: N802
-                path = urlparse(self.path).path
-                self._dispatch("POST", path, self._body())
+                if not self._csrf_ok():
+                    self._json(403, {"error": "origin not allowed"})
+                    return
+                try:
+                    body = self._body()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    self._json(400, {"error": str(exc)})
+                    return
+                self._dispatch("POST", urlparse(self.path).path, body)
 
             def _dispatch(self, method: str, path: str, body: dict[str, Any]) -> None:
                 key = f"{method} {path}"
@@ -82,7 +106,10 @@ class MotifAPI:
                 except Exception as exc:  # noqa: BLE001
                     self._json(400, {"error": str(exc)})
 
-        self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+        class Server(ThreadingHTTPServer):
+            allow_reuse_address = True
+
+        self._server = Server((self.host, self.port), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
@@ -91,6 +118,9 @@ class MotifAPI:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
 
 
 class MotifClient:

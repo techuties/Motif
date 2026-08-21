@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Motif</string>
+    <key>CFBundleExecutable</key>
+    <string>Motif</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>app.motif.recorder</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Motif</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Motif only uses Apple Events if a script asks another Mac app to cooperate.</string>
+    <key>NSAccessibilityUsageDescription</key>
+    <string>Motif records and replays mouse and keyboard. Grant Accessibility to Motif so those events can be captured and sent.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Motif reads pixel colours for wait-until-colour triggers. Grant Screen Recording to Motif if you use that feature.</string>
+</dict>
+</plist>

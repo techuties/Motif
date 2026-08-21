@@ -5,7 +5,7 @@ from motif.models import Event, EventType, HumanizePreset, Script
 
 def example_script() -> Script:
     script = Script(name="Welcome motif")
-    script.humanize.apply_preset(HumanizePreset.NATURAL.value)
+    script.humanize.apply_preset(HumanizePreset.PRECISE.value)
     script.origin_x = 200
     script.origin_y = 200
     script.origin_set = True

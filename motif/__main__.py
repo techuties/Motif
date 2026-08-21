@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 
 
 def _enable_dpi() -> None:
@@ -62,11 +61,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(client.play(args.path, args.loops), indent=2))
                 return 0
             except ConnectionError:
-                if not args.headless:
-                    print("Motif GUI is not running — replaying headless.", file=sys.stderr)
+                print("Motif GUI is not running — replaying headless.", file=sys.stderr)
         if args.cmd == "play":
+            from motif.macos import prepare_input_hooks
             from motif.player import Player
             from motif.storage import load_script
+
+            prepare_input_hooks()
 
             script = load_script(args.path)
             if args.loops is not None:

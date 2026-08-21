@@ -1,8 +1,27 @@
 [project]
 name = "motif"
 version = "1.0.0"
-description = "Cross-platform mouse and keyboard recorder with a visual editor"
+description = "Motif: cross-platform mouse and keyboard recorder, auto-clicker, and macro replay with a visual editor"
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = [
+    "motif",
+    "auto-clicker",
+    "autoclicker",
+    "auto clicker",
+    "mouse-recorder",
+    "keyboard-recorder",
+    "macro-recorder",
+    "input-recorder",
+    "input-replay",
+    "macro replay",
+    "replay",
+    "automation",
+    "pynput",
+    "macos",
+    "windows",
+    "linux",
+]
 dependencies = [
     "PySide6>=6.6.0",
     "pynput>=1.7.7",

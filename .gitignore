@@ -10,6 +10,12 @@ build/
 .DS_Store
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.motif.json
 *.motif.json.bak
+*.raw.motif.json
+analysis/*.json
 .idea/
 .vscode/

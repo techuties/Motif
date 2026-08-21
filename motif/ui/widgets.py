@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -23,30 +25,260 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from motif.models import EVENT_LABELS, Event, EventType, HumanizePreset, PathStyle, PlayMode, Script
-from motif.ui.theme import ACCENT, BG, BORDER, MUTED, ORIGIN, SURFACE, TEXT, TYPE_COLOR
+from motif.models import (
+    EVENT_LABELS,
+    Event,
+    EventType,
+    HumanizePreset,
+    HumanizeSettings,
+    PathStyle,
+    PlayMode,
+    Script,
+    apply_swipe_direction,
+    event_kind_label,
+    is_app_switch,
+    space_fallback_label,
+    swipe_shortcut_key,
+)
+from motif.screen import Display
+from motif.ui.theme import (
+    ACCENT,
+    BG,
+    BORDER,
+    CARD_PAD_H,
+    CARD_PAD_V,
+    MUTED,
+    ORIGIN,
+    RADIUS_SWATCH,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    SURFACE,
+    SWATCH_H,
+    SWATCH_W,
+    TEXT,
+    TYPE_CHIP,
+    TYPE_COLOR,
+)
+
+EMPTY_PANE_COPY = "No events yet\nRecord (F9) or click + Add"
+
+# Extra inspector groups per event type. "event" and "notes" are always shown
+# when an event is selected. Add a type here when you add EventType + fields.
+INSPECTOR_GROUPS: dict[EventType, frozenset[str]] = {
+    EventType.MOVE: frozenset({"pos", "motion"}),
+    EventType.CLICK: frozenset({"pos", "click", "motion"}),
+    EventType.SCROLL: frozenset({"pos", "scroll"}),
+    EventType.KEY_DOWN: frozenset({"key"}),
+    EventType.KEY_UP: frozenset({"key"}),
+    EventType.WAIT: frozenset(),
+    EventType.WAIT_PIXEL: frozenset({"pos", "pixel"}),
+    EventType.WAIT_PIXEL_CHANGE: frozenset({"pos", "pixel"}),
+    EventType.GO_ORIGIN: frozenset({"motion"}),
+    EventType.COMMENT: frozenset(),
+    EventType.SWIPE: frozenset({"swipe"}),
+}
+ALWAYS_EVENT_GROUPS = frozenset({"event", "notes"})
+
+
+def polish(widget: QWidget) -> None:
+    style = widget.style()
+    style.unpolish(widget)
+    style.polish(widget)
+    widget.update()
+
+
+def apply_button_kind(btn: QAbstractButton, kind: str) -> None:
+    """primary | secondary/ghost | danger/record | recording | playing | stop | cycle | speed."""
+    btn.setProperty("kind", kind)
+    polish(btn)
+
+
+def apply_banner(label: QLabel, text: str = "", tone: str = "") -> None:
+    label.setText(text)
+    label.setProperty("tone", tone)
+    label.setVisible(bool(text))
+    polish(label)
+
+
+def section_header(title: str) -> QLabel:
+    label = QLabel(title)
+    label.setProperty("role", "section")
+    return label
+
+
+def empty_state_label(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setProperty("role", "empty")
+    return label
+
+
+def attach_empty_overlay(host: QWidget, text: str = EMPTY_PANE_COPY) -> QLabel:
+    label = empty_state_label(text)
+    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    label.setParent(host)
+    return label
+
+
+def layout_empty_overlay(
+    label: QLabel,
+    rect: QRect,
+    *,
+    visible: bool,
+    pad: int = 24,
+    top: int = 16,
+) -> None:
+    label.setVisible(visible)
+    if not visible:
+        return
+    label.setGeometry(rect.adjusted(pad, top, -pad, -16))
+    label.raise_()
+
+
+def hint_label(text: str = "") -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setProperty("role", "hint")
+    return label
+
+
+def section_box(title: str) -> tuple[QWidget, QFormLayout]:
+    box = QWidget()
+    col = QVBoxLayout(box)
+    col.setContentsMargins(0, SPACE_SM, 0, SPACE_MD)
+    col.setSpacing(SPACE_MD)
+    if title:
+        col.addWidget(section_header(title))
+    form = QFormLayout()
+    form.setContentsMargins(0, 0, 0, 0)
+    form.setHorizontalSpacing(SPACE_LG)
+    form.setVerticalSpacing(SPACE_MD)
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    col.addLayout(form)
+    return box, form
+
+
+def inspector_groups_for(event: Event | None) -> frozenset[str]:
+    if event is None:
+        return frozenset()
+    groups = ALWAYS_EVENT_GROUPS | INSPECTOR_GROUPS.get(event.type_enum(), frozenset())
+    if event.has_position():
+        groups = groups | {"pos"}
+    return groups
+
+
+def set_visible_groups(boxes: dict[str, QWidget], names: frozenset[str]) -> None:
+    for name, widget in boxes.items():
+        widget.setVisible(name in names)
+
+
+def ui_font(widget: QWidget, size: int) -> QFont:
+    font = QFont(widget.font())
+    if size > 0:
+        font.setPointSize(size)
+    return font
+
+
+def apply_swatch(frame: QFrame, color: str) -> None:
+    """10×34 rounded type chip — same size on every event card."""
+    frame.setFixedSize(SWATCH_W, SWATCH_H)
+    frame.setStyleSheet(f"background:{color}; border:none; border-radius:{RADIUS_SWATCH}px;")
+
+
+def apply_type_tint(label: QLabel, color: str) -> None:
+    pal = label.palette()
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(color))
+    label.setPalette(pal)
+    label.setForegroundRole(QPalette.ColorRole.WindowText)
 
 
 def type_color(event: Event) -> QColor:
     return QColor(TYPE_COLOR.get(event.type_enum(), MUTED))
 
 
+def event_screen_xy(script: Script, event: Event) -> tuple[int, int]:
+    """Map an event’s stored coords onto the screen (origin + x/y)."""
+    if script.origin_set:
+        return script.origin_x + event.x, script.origin_y + event.y
+    return event.x, event.y
+
+
+def path_screen_xy(script: Script, x: int, y: int) -> tuple[int, int]:
+    if script.origin_set:
+        return script.origin_x + x, script.origin_y + y
+    return x, y
+
+
+def fit_screen_rect(screen: QRect, view: QRect, pad: int = 16) -> QRect:
+    """Letterbox `screen` inside `view` so the whole display fits."""
+    inner = view.adjusted(pad, pad, -pad, -pad)
+    if screen.width() <= 0 or screen.height() <= 0 or inner.width() <= 0 or inner.height() <= 0:
+        return inner
+    scale = min(inner.width() / screen.width(), inner.height() / screen.height())
+    width = max(1, int(screen.width() * scale))
+    height = max(1, int(screen.height() * scale))
+    x = inner.x() + (inner.width() - width) // 2
+    y = inner.y() + (inner.height() - height) // 2
+    return QRect(x, y, width, height)
+
+
+def map_screen_point(sx: int, sy: int, screen: QRect, fitted: QRect) -> QPoint:
+    """Map a global logical point (pynput / Qt) through a letterboxed desktop rect."""
+    if screen.width() <= 0 or screen.height() <= 0:
+        return QPoint(fitted.x(), fitted.y())
+    nx = (sx - screen.x()) / screen.width()
+    ny = (sy - screen.y()) / screen.height()
+    return QPoint(
+        fitted.x() + int(round(nx * fitted.width())),
+        fitted.y() + int(round(ny * fitted.height())),
+    )
+
+
+def map_screen_rect(src: QRect, screen: QRect, fitted: QRect) -> QRect:
+    tl = map_screen_point(src.x(), src.y(), screen, fitted)
+    br = map_screen_point(src.x() + src.width(), src.y() + src.height(), screen, fitted)
+    return QRect(tl.x(), tl.y(), max(1, br.x() - tl.x()), max(1, br.y() - tl.y()))
+
+
+def displays_union_rect(displays: list[Display]) -> QRect:
+    if not displays:
+        return QRect(0, 0, 1920, 1080)
+    x1 = min(d.x for d in displays)
+    y1 = min(d.y for d in displays)
+    x2 = max(d.x + d.width for d in displays)
+    y2 = max(d.y + d.height for d in displays)
+    return QRect(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
+
+
 class PathCanvas(QWidget):
     event_clicked = Signal(str)
-    origin_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.script = Script()
         self.selected_id = ""
-        self.setMinimumHeight(168)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(118)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         self.setToolTip("The journey. Click a dot to select that event. Origin is the gold cross.")
+        self.empty = attach_empty_overlay(self)
+        self._sync_empty()
 
     def set_script(self, script: Script, selected_id: str = "") -> None:
         self.script = script
         self.selected_id = selected_id
+        self._sync_empty()
         self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_empty()
+
+    def _sync_empty(self) -> None:
+        layout_empty_overlay(self.empty, self.rect(), visible=not self.script.events)
 
     def _points(self) -> list[tuple[int, int, Event]]:
         pts: list[tuple[int, int, Event]] = []
@@ -84,8 +316,6 @@ class PathCanvas(QWidget):
         painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 14, 14)
 
         if not self.script.events:
-            painter.setPen(QColor(MUTED))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Record a path to see it here")
             return
 
         path = QPainterPath()
@@ -112,9 +342,10 @@ class PathCanvas(QWidget):
         painter.drawLine(origin.x(), origin.y() - 8, origin.x(), origin.y() + 8)
 
         for ev in self.script.events:
-            if not ev.has_position() or ev.type_enum() == EventType.MOVE and ev.points:
-                if ev.type_enum() != EventType.CLICK:
-                    continue
+            if ev.type_enum() == EventType.MOVE and ev.points:
+                continue
+            if not ev.has_position():
+                continue
             pt = self._map(ev.x, ev.y)
             color = type_color(ev)
             radius = 7 if ev.id == self.selected_id else 5
@@ -127,16 +358,12 @@ class PathCanvas(QWidget):
                 painter.drawEllipse(pt, radius + 4, radius + 4)
 
         painter.setPen(QColor(MUTED))
-        painter.setFont(QFont(self.font().family(), 10))
+        painter.setFont(ui_font(self, TYPE_CHIP))
         painter.drawText(14, 20, "Zero ground")
         painter.drawText(origin + QPoint(10, -8), "0,0")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         click = event.position().toPoint()
-        origin = self._map(0, 0)
-        if (click - origin).manhattanLength() < 14:
-            self.origin_clicked.emit()
-            return
         best = None
         best_d = 18
         for ev in self.script.events:
@@ -151,40 +378,243 @@ class PathCanvas(QWidget):
             self.event_clicked.emit(best.id)
 
 
+class ScreenHistoryView(QWidget):
+    """Letterboxed virtual desktop with events at their global logical positions."""
+
+    event_clicked = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.script = Script()
+        self.selected_id = ""
+        self.screen_rect = QRect(0, 0, 1920, 1080)
+        self.displays: list[Display] = []
+        self.setMinimumHeight(200)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setToolTip(
+            "All displays as one desktop. Clicks stay on the monitor where you recorded them."
+        )
+        self.empty = attach_empty_overlay(self)
+        self._sync_empty()
+
+    def set_script(self, script: Script, selected_id: str = "") -> None:
+        self.script = script
+        self.selected_id = selected_id
+        self._sync_empty()
+        self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_empty()
+
+    def _sync_empty(self) -> None:
+        layout_empty_overlay(self.empty, self._fitted(), visible=not self.script.events, top=40)
+
+    def set_screen_rect(self, rect: QRect) -> None:
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        if rect != self.screen_rect or not self.displays:
+            self.screen_rect = QRect(rect)
+            if not self.displays:
+                self.displays = [
+                    Display(index=1, x=rect.x(), y=rect.y(), width=rect.width(), height=rect.height())
+                ]
+            self.update()
+
+    def set_displays(self, displays: list[Display], desktop: QRect | None = None) -> None:
+        self.displays = list(displays)
+        if desktop is not None and desktop.width() > 0 and desktop.height() > 0:
+            self.screen_rect = QRect(desktop)
+        elif self.displays:
+            self.screen_rect = displays_union_rect(self.displays)
+        self.update()
+
+    def _fitted(self) -> QRect:
+        return fit_screen_rect(self.screen_rect, self.rect(), pad=18)
+
+    def _map(self, sx: int, sy: int) -> QPoint:
+        return map_screen_point(sx, sy, self.screen_rect, self._fitted())
+
+    def _headline(self) -> str:
+        if len(self.displays) > 1:
+            return "All displays"
+        if self.displays:
+            return self.displays[0].label()
+        screen = self.screen_rect
+        return f"Display 1 · {screen.width()}×{screen.height()}"
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor(BG))
+        fitted = self._fitted()
+        screen = self.screen_rect
+        many = len(self.displays) > 1
+
+        if many:
+            for display in self.displays:
+                tile = map_screen_rect(
+                    QRect(display.x, display.y, display.width, display.height),
+                    screen,
+                    fitted,
+                )
+                painter.setBrush(QColor(SURFACE))
+                painter.setPen(QPen(QColor(BORDER), 1))
+                painter.drawRoundedRect(tile, 8, 8)
+                painter.setPen(QColor(MUTED))
+                painter.setFont(ui_font(self, TYPE_CHIP))
+                painter.drawText(
+                    tile.adjusted(10, 6, -10, 0),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                    display.label(),
+                )
+        else:
+            painter.setBrush(QColor(SURFACE))
+            painter.setPen(QPen(QColor(BORDER), 1))
+            painter.drawRoundedRect(fitted, 10, 10)
+
+        painter.setPen(QColor(MUTED))
+        painter.setFont(ui_font(self, TYPE_CHIP))
+        label_target = fitted if not many else self.rect()
+        painter.drawText(
+            label_target.adjusted(12, 8, -12, 0),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+            self._headline(),
+        )
+
+        if not self.script.events:
+            return
+
+        path = QPainterPath()
+        first = True
+        for ev in self.script.events:
+            coords: list[tuple[int, int]] = []
+            if ev.points:
+                coords.extend(path_screen_xy(self.script, int(p["x"]), int(p["y"])) for p in ev.points)
+            elif ev.has_position():
+                coords.append(event_screen_xy(self.script, ev))
+            for sx, sy in coords:
+                pt = self._map(sx, sy)
+                if first:
+                    path.moveTo(pt)
+                    first = False
+                else:
+                    path.lineTo(pt)
+        painter.setPen(QPen(QColor(ACCENT), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        ox, oy = (self.script.origin_x, self.script.origin_y) if self.script.origin_set else (0, 0)
+        origin = self._map(ox, oy)
+        painter.setPen(QPen(QColor(ORIGIN), 2))
+        painter.drawLine(origin.x() - 8, origin.y(), origin.x() + 8, origin.y())
+        painter.drawLine(origin.x(), origin.y() - 8, origin.x(), origin.y() + 8)
+        painter.setPen(QColor(MUTED))
+        painter.drawText(origin + QPoint(10, -8), f"{ox},{oy}")
+
+        for ev in self.script.events:
+            if ev.type_enum() == EventType.MOVE and ev.points:
+                continue
+            if not ev.has_position():
+                continue
+            sx, sy = event_screen_xy(self.script, ev)
+            pt = self._map(sx, sy)
+            color = type_color(ev)
+            selected = ev.id == self.selected_id
+            radius = 8 if selected else 5
+            painter.setBrush(color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(pt, radius, radius)
+            if selected:
+                painter.setPen(QPen(QColor(TEXT), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(pt, radius + 5, radius + 5)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        click = event.position().toPoint()
+        best = None
+        best_d = 20
+        for ev in self.script.events:
+            if not ev.has_position():
+                continue
+            sx, sy = event_screen_xy(self.script, ev)
+            pt = self._map(sx, sy)
+            d = (click - pt).manhattanLength()
+            if d < best_d:
+                best = ev
+                best_d = d
+        if best:
+            self.event_clicked.emit(best.id)
+
+
 class EventCard(QWidget):
-    def __init__(self, event: Event, parent: QWidget | None = None) -> None:
+    def __init__(self, event: Event, selected: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.model = event
+        self.setObjectName("eventCard")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(10)
+        layout.setContentsMargins(CARD_PAD_H, CARD_PAD_V, CARD_PAD_H, CARD_PAD_V)
+        layout.setSpacing(SPACE_SM)
 
         self.swatch = QFrame()
-        self.swatch.setFixedSize(10, 34)
-        self.swatch.setStyleSheet(f"background:{TYPE_COLOR.get(event.type_enum(), MUTED)}; border-radius:3px;")
+        self.swatch.setObjectName("typeSwatch")
+        apply_swatch(self.swatch, TYPE_COLOR.get(event.type_enum(), MUTED))
         layout.addWidget(self.swatch)
 
         text = QVBoxLayout()
         text.setSpacing(1)
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(SPACE_SM)
+        kind_label = event_kind_label(event)
+        self.kind = QLabel(kind_label.upper())
+        self.kind.setObjectName("eventKind")
+        self.kind.setProperty("role", "chip")
+        self.kind.setWordWrap(False)
+        self.kind.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self.title = QLabel(event.display_name())
-        self.title.setStyleSheet("font-weight:600;")
+        self.title.setObjectName("eventTitle")
+        self.title.setWordWrap(False)
+        self.title.setMinimumWidth(40)
+        self.title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.title.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        head.addWidget(self.kind)
+        head.addWidget(self.title, 1)
         self.detail = QLabel(event.summary())
-        self.detail.setProperty("role", "muted")
-        self.detail.setStyleSheet(f"color:{MUTED}; font-size:12px;")
-        text.addWidget(self.title)
+        self.detail.setObjectName("eventDetail")
+        self.detail.setProperty("role", "hint")
+        self.detail.setWordWrap(False)
+        self.detail.setMinimumWidth(40)
+        text.addLayout(head)
         text.addWidget(self.detail)
         layout.addLayout(text, 1)
 
-        self.delay = QLabel(f"{event.delay_ms} ms")
-        self.delay.setProperty("role", "muted")
-        self.delay.setStyleSheet(f"color:{MUTED};")
-        layout.addWidget(self.delay)
-
+        delay_text = f"{event.delay_ms} ms"
         if not event.enabled:
-            self.title.setStyleSheet("font-weight:600; color:#667088;")
+            delay_text = f"Off · {delay_text}"
+        self.delay = QLabel(delay_text)
+        self.delay.setObjectName("eventDelay")
+        self.delay.setProperty("role", "muted")
+        self.delay.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.delay.setWordWrap(False)
+        self.delay.setFixedWidth(76)
+        self.delay.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.delay)
+        self.set_card_state(selected, event.enabled)
+
+    def set_card_state(self, selected: bool, enabled: bool = True) -> None:
+        self.setProperty("selected", "true" if selected else "false")
+        self.setProperty("state", "enabled" if enabled else "disabled")
+        color = TYPE_COLOR.get(self.model.type_enum(), MUTED) if enabled else BORDER
+        apply_swatch(self.swatch, color)
+        apply_type_tint(self.kind, color if enabled else MUTED)
+        polish(self)
+
+    def set_selected(self, selected: bool) -> None:
+        self.set_card_state(selected, self.model.enabled)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(360, 54)
+        return QSize(360, 58)
 
 
 class EventList(QListWidget):
@@ -195,16 +625,27 @@ class EventList(QListWidget):
         super().__init__(parent)
         self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setSpacing(2)
+        self.setMinimumHeight(168)
         self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.model().rowsMoved.connect(lambda *_: self.order_changed.emit())
+        self.itemSelectionChanged.connect(self._sync_card_selection)
+        self.empty = attach_empty_overlay(self.viewport())
+        self._sync_empty()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
             self.delete_requested.emit()
             return
         super().keyPressEvent(event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_empty()
+
+    def _sync_empty(self) -> None:
+        layout_empty_overlay(self.empty, self.viewport().rect(), visible=self.count() == 0)
 
     def rebuild(self, script: Script, selected_id: str = "") -> None:
         current = selected_id
@@ -213,15 +654,29 @@ class EventList(QListWidget):
         for event in script.events:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, event.id)
-            card = EventCard(event)
+            selected = event.id == current
+            card = EventCard(event, selected=selected)
             item.setSizeHint(card.sizeHint())
             self.addItem(item)
             self.setItemWidget(item, card)
-            if event.id == current:
+            if selected:
                 self.setCurrentItem(item)
         self.blockSignals(False)
         if self.currentItem() is None and self.count():
             self.setCurrentRow(0)
+        self._sync_card_selection()
+        self._sync_empty()
+
+    def _sync_card_selection(self) -> None:
+        chosen = set(self.selected_ids())
+        current = self.selected_id()
+        if current:
+            chosen.add(current)
+        for i in range(self.count()):
+            item = self.item(i)
+            card = self.itemWidget(item)
+            if isinstance(card, EventCard):
+                card.set_selected(item.data(Qt.ItemDataRole.UserRole) in chosen)
 
     def ordered_ids(self) -> list[str]:
         ids = []
@@ -232,6 +687,9 @@ class EventList(QListWidget):
     def selected_id(self) -> str:
         item = self.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else ""
+
+    def selected_ids(self) -> list[str]:
+        return [item.data(Qt.ItemDataRole.UserRole) for item in self.selectedItems()]
 
 
 class Inspector(QWidget):
@@ -245,24 +703,17 @@ class Inspector(QWidget):
         self.script = Script()
         self.active: Event | None = None
         self._guard = False
+        self.setMinimumWidth(280)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
+        root.setContentsMargins(SPACE_LG, 0, SPACE_LG, SPACE_MD)
+        root.setSpacing(SPACE_MD)
 
-        head = QLabel("INSPECTOR")
-        head.setProperty("role", "section")
-        root.addWidget(head)
+        root.addWidget(section_header("INSPECTOR"))
 
-        self.empty = QLabel("Select an event to rename, move, or change it.")
-        self.empty.setWordWrap(True)
-        self.empty.setProperty("role", "muted")
+        self.empty = empty_state_label("Record (F9) or click + Add, then select an event to edit it.")
         root.addWidget(self.empty)
 
-        self.form_box = QFrame()
-        form = QFormLayout(self.form_box)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(8)
         self.name_edit = QLineEdit()
         self.enabled_box = QCheckBox("Enabled")
         self.delay = QSpinBox()
@@ -272,6 +723,10 @@ class Inspector(QWidget):
         self.y_box = QSpinBox()
         for box in (self.x_box, self.y_box):
             box.setRange(-20000, 20000)
+        self.dx_box = QSpinBox()
+        self.dy_box = QSpinBox()
+        for box in (self.dx_box, self.dy_box):
+            box.setRange(-20000, 20000)
         self.button = QComboBox()
         self.button.addItems(["left", "right", "middle"])
         self.pressed = QComboBox()
@@ -279,8 +734,12 @@ class Inspector(QWidget):
         self.key = QLineEdit()
         self.color = QLineEdit("#34C759")
         self.pick_color = QPushButton("Swatch")
+        apply_button_kind(self.pick_color, "ghost")
         self.pick_screen = QPushButton("Pick pixel")
+        apply_button_kind(self.pick_screen, "ghost")
         color_row = QHBoxLayout()
+        color_row.setContentsMargins(0, 0, 0, 0)
+        color_row.setSpacing(SPACE_SM)
         color_row.addWidget(self.color, 1)
         color_row.addWidget(self.pick_color)
         color_row.addWidget(self.pick_screen)
@@ -290,6 +749,7 @@ class Inspector(QWidget):
         self.tolerance.setRange(0, 180)
         self.match = QComboBox()
         self.match.addItems(["is", "is_not", "brighter", "darker"])
+        self.match_label = QLabel("When")
         self.timeout = QSpinBox()
         self.timeout.setRange(100, 300000)
         self.timeout.setSuffix(" ms")
@@ -300,33 +760,97 @@ class Inspector(QWidget):
         self.travel.setSpecialValueText("Auto")
         self.travel.setValue(-1)
         self.notes = QPlainTextEdit()
-        self.notes.setFixedHeight(64)
-        form.addRow("Name", self.name_edit)
-        form.addRow("", self.enabled_box)
-        form.addRow("Pause before", self.delay)
-        form.addRow("X from origin", self.x_box)
-        form.addRow("Y from origin", self.y_box)
-        form.addRow("Button", self.button)
-        form.addRow("Click", self.pressed)
-        form.addRow("Key", self.key)
-        form.addRow("Colour", self.color_wrap)
-        form.addRow("Tolerance", self.tolerance)
-        form.addRow("When", self.match)
-        form.addRow("Timeout", self.timeout)
-        form.addRow("Path", self.path)
-        form.addRow("Travel", self.travel)
-        form.addRow("Notes", self.notes)
+        self.notes.setFixedHeight(56)
+        self.notes.setPlaceholderText("Optional note")
+
+        self.event_box, event_form = section_box("EVENT")
+        event_form.addRow("Name", self.name_edit)
+        event_form.addRow("", self.enabled_box)
+        event_form.addRow("Pause before", self.delay)
+
+        self.pos_box, pos_form = section_box("POSITION")
+        pos_form.addRow("X from origin", self.x_box)
+        pos_form.addRow("Y from origin", self.y_box)
+
+        self.click_box, click_form = section_box("CLICK")
+        click_form.addRow("Button", self.button)
+        click_form.addRow("Press", self.pressed)
+
+        self.key_box, key_form = section_box("KEY")
+        key_form.addRow("Key", self.key)
+
+        self.scroll_box, scroll_form = section_box("SCROLL")
+        scroll_form.addRow("Horizontal", self.dx_box)
+        scroll_form.addRow("Vertical", self.dy_box)
+
+        self.direction = QComboBox()
+        self.direction.addItems(["left", "right", "up", "down"])
+        self.app_name = QLineEdit()
+        self.app_name.setPlaceholderText("Frontmost app")
+        self.bundle_edit = QLineEdit()
+        self.bundle_edit.setPlaceholderText("Bundle id")
+        self.swipe_note = hint_label()
+        self.swipe_box, swipe_form = section_box("SWITCH")
+        swipe_form.addRow("App", self.app_name)
+        swipe_form.addRow("Bundle", self.bundle_edit)
+        swipe_form.addRow("Fallback", self.direction)
+        swipe_form.addRow(self.swipe_note)
+
+        self.pixel_box, pixel_form = section_box("PIXEL")
+        pixel_form.addRow("Colour", self.color_wrap)
+        pixel_form.addRow("Tolerance", self.tolerance)
+        pixel_form.addRow(self.match_label, self.match)
+        pixel_form.addRow("Timeout", self.timeout)
+
+        self.motion_box, motion_form = section_box("MOTION")
+        motion_form.addRow("Path", self.path)
+        motion_form.addRow("Travel", self.travel)
+
+        self.notes_box, notes_form = section_box("NOTES")
+        notes_form.addRow(self.notes)
+
+        self.form_box = QWidget()
+        form_col = QVBoxLayout(self.form_box)
+        form_col.setContentsMargins(0, 0, 0, 0)
+        form_col.setSpacing(0)
+        self.event_groups = {
+            "event": self.event_box,
+            "pos": self.pos_box,
+            "click": self.click_box,
+            "key": self.key_box,
+            "scroll": self.scroll_box,
+            "swipe": self.swipe_box,
+            "pixel": self.pixel_box,
+            "motion": self.motion_box,
+            "notes": self.notes_box,
+        }
+        for box in self.event_groups.values():
+            form_col.addWidget(box)
         root.addWidget(self.form_box)
 
-        script_title = QLabel("SCRIPT")
-        script_title.setProperty("role", "section")
-        root.addWidget(script_title)
-
-        sform = QFormLayout()
+        self.loop_box, loop_form = section_box("REPLAY")
         self.play_mode = QComboBox()
-        self.play_mode.addItem("Play at recorded origin", PlayMode.ABSOLUTE.value)
-        self.play_mode.addItem("Play from current cursor", PlayMode.FROM_CURSOR.value)
+        self.play_mode.addItem("Replay at recorded origin", PlayMode.ABSOLUTE.value)
+        self.play_mode.addItem("Replay from current cursor", PlayMode.FROM_CURSOR.value)
         self.play_mode.addItem("Always start at origin", PlayMode.FROM_ORIGIN.value)
+        self.play_mode.setItemData(
+            0,
+            "Replay at the same global positions that were recorded. Moving Motif to another display does not move the clicks.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self.play_mode.setItemData(
+            1,
+            "Offset the whole path from wherever the mouse is now. If the cursor is on another display, replay happens there.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self.play_mode.setItemData(
+            2,
+            "Move to zero-ground first, then play relative to that origin — still the recorded display unless you move origin.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self.play_mode.setToolTip(
+            "Recorded origin stays on the display(s) you captured. From cursor follows the mouse, including another screen."
+        )
         self.loops = QSpinBox()
         self.loops.setRange(0, 100000)
         self.loops.setSpecialValueText("Forever")
@@ -335,32 +859,58 @@ class Inspector(QWidget):
         self.gap.setSuffix(" ms")
         self.return_origin = QCheckBox("Return to zero ground after each cycle")
         self.park = QCheckBox("Park at origin before each cycle")
+        loop_form.addRow("Mode", self.play_mode)
+        loop_form.addRow("Cycles", self.loops)
+        loop_form.addRow("Gap", self.gap)
+        loop_form.addRow(self.return_origin)
+        loop_form.addRow(self.park)
+        loop_form.addRow(
+            hint_label(
+                "Recorded origin uses the same global coordinates as capture — clicks stay on that display even if Motif moves. "
+                "From cursor shifts the path to the mouse, so another display moves replay there."
+            )
+        )
+        root.addWidget(self.loop_box)
+
+        self.feel_box, feel_form = section_box("FEEL")
         self.preset = QComboBox()
         self.preset.addItems([p.value for p in HumanizePreset])
-        self.speed = QComboBox()
-        self.speed.addItems(["0.5", "0.75", "1.0", "1.25", "1.5", "2.0"])
-        self.speed.setCurrentText("1.0")
+        self.speed = QDoubleSpinBox()
+        self.speed.setRange(0.25, 4.0)
+        self.speed.setSingleStep(0.25)
+        self.speed.setDecimals(2)
+        self.speed.setValue(1.0)
+        self.speed.setSuffix("×")
+        self.speed.setToolTip("1.0× is the recorded timing.")
         self.human_path = QComboBox()
         self.human_path.addItems([p.value for p in PathStyle])
+        self.human_path.setToolTip(
+            "recorded walks the mouse path from the take. snap jumps to the destination."
+        )
+        feel_form.addRow("Feel", self.preset)
+        feel_form.addRow("Speed", self.speed)
+        feel_form.addRow("Default path", self.human_path)
+        feel_form.addRow(
+            hint_label(
+                "Replay uses the Cycles count from the transport (Once by default). Park and return only apply when those boxes are checked."
+            )
+        )
+        root.addWidget(self.feel_box)
+
+        self.origin_box, _origin_form = section_box("ORIGIN")
+        origin_col = self.origin_box.layout()
         self.zero = QPushButton("Move everything to zero ground")
-        self.zero.setProperty("kind", "primary")
+        apply_button_kind(self.zero, "primary")
         self.cursor_origin = QPushButton("Put origin at cursor")
-        sform.addRow("Play", self.play_mode)
-        sform.addRow("Cycles", self.loops)
-        sform.addRow("Gap", self.gap)
-        sform.addRow(self.return_origin)
-        sform.addRow(self.park)
-        sform.addRow("Feel", self.preset)
-        sform.addRow("Speed", self.speed)
-        sform.addRow("Default path", self.human_path)
-        root.addLayout(sform)
-        root.addWidget(self.zero)
-        root.addWidget(self.cursor_origin)
-        hint = QLabel("Zero ground is (0,0) of this motif. Cycles start and end there so loops stay aligned.")
-        hint.setWordWrap(True)
-        hint.setProperty("role", "muted")
-        hint.setStyleSheet(f"color:{MUTED}; font-size:12px;")
-        root.addWidget(hint)
+        apply_button_kind(self.cursor_origin, "ghost")
+        origin_col.addWidget(self.zero)
+        origin_col.addWidget(self.cursor_origin)
+        origin_col.addWidget(
+            hint_label(
+                "Zero ground is (0,0) of this motif. A single Replay does not park or return unless you add a Go to origin event."
+            )
+        )
+        root.addWidget(self.origin_box)
         root.addStretch(1)
 
         widgets = [
@@ -369,6 +919,11 @@ class Inspector(QWidget):
             self.delay,
             self.x_box,
             self.y_box,
+            self.dx_box,
+            self.dy_box,
+            self.direction,
+            self.app_name,
+            self.bundle_edit,
             self.button,
             self.pressed,
             self.key,
@@ -395,7 +950,7 @@ class Inspector(QWidget):
                 w.textChanged.connect(self._commit)
             elif isinstance(w, QComboBox):
                 w.currentIndexChanged.connect(self._commit)
-            elif isinstance(w, QSpinBox):
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
                 w.valueChanged.connect(self._commit)
             elif isinstance(w, QCheckBox):
                 w.toggled.connect(self._commit)
@@ -419,6 +974,13 @@ class Inspector(QWidget):
             self._guard = False
 
     def _bind_values(self, script: Script, event: Event | None) -> None:
+        has_events = bool(script.events)
+        if event is None:
+            self.empty.setText(
+                "Record (F9) or click + Add, then select an event to edit it."
+                if not has_events
+                else "Select an event to rename, move, or change it."
+            )
         self.empty.setVisible(event is None)
         self.form_box.setVisible(event is not None)
         self.play_mode.setCurrentIndex(max(0, self.play_mode.findData(script.play_mode)))
@@ -427,40 +989,38 @@ class Inspector(QWidget):
         self.return_origin.setChecked(script.loop.return_to_origin)
         self.park.setChecked(script.loop.park_before_cycle)
         self.preset.setCurrentText(script.humanize.preset)
-        self.speed.setCurrentText(str(script.humanize.speed) if str(script.humanize.speed) in {"0.5", "0.75", "1.0", "1.25", "1.5", "2.0"} else "1.0")
+        self.speed.setValue(float(script.humanize.speed))
         self.human_path.setCurrentText(script.humanize.path)
-        if event:
-            self.name_edit.setText(event.name)
-            self.enabled_box.setChecked(event.enabled)
-            self.delay.setValue(event.delay_ms)
-            self.x_box.setValue(event.x)
-            self.y_box.setValue(event.y)
-            self.button.setCurrentText(event.button)
-            self.pressed.setCurrentText("down" if event.pressed else "up")
-            self.key.setText(event.key)
-            self.color.setText(event.color)
-            self.tolerance.setValue(event.tolerance)
-            self.match.setCurrentText(event.match)
-            self.timeout.setValue(event.timeout_ms)
-            self.path.setCurrentText(event.path or "(script default)")
-            self.travel.setValue(event.travel_ms if event.travel_ms is not None else -1)
-            self.notes.setPlainText(event.notes)
-            kind = event.type_enum()
-            spatial = event.has_position()
-            self.x_box.setEnabled(spatial)
-            self.y_box.setEnabled(spatial)
-            clickish = kind == EventType.CLICK
-            self.button.setEnabled(clickish)
-            self.pressed.setEnabled(clickish)
-            keyish = kind in {EventType.KEY_DOWN, EventType.KEY_UP}
-            self.key.setEnabled(keyish)
-            pixelish = kind in {EventType.WAIT_PIXEL, EventType.WAIT_PIXEL_CHANGE}
-            self.color.setEnabled(pixelish)
-            self.pick_color.setEnabled(pixelish)
-            self.pick_screen.setEnabled(True)
-            self.tolerance.setEnabled(pixelish)
-            self.match.setEnabled(kind == EventType.WAIT_PIXEL)
-            self.timeout.setEnabled(pixelish)
+        groups = inspector_groups_for(event)
+        set_visible_groups(self.event_groups, groups)
+        if event is None:
+            return
+        self.name_edit.setText(event.name)
+        self.enabled_box.setChecked(event.enabled)
+        self.delay.setValue(event.delay_ms)
+        self.x_box.setValue(event.x)
+        self.y_box.setValue(event.y)
+        self.dx_box.setValue(event.dx)
+        self.dy_box.setValue(event.dy)
+        self.direction.setCurrentText(event.direction or "left")
+        self.app_name.setText(event.app)
+        self.bundle_edit.setText(event.bundle_id)
+        self.button.setCurrentText(event.button)
+        self.pressed.setCurrentText("down" if event.pressed else "up")
+        self.key.setText(event.key)
+        self.color.setText(event.color)
+        self.tolerance.setValue(event.tolerance)
+        self.match.setCurrentText(event.match)
+        self.timeout.setValue(event.timeout_ms)
+        self.path.setCurrentText(event.path or "(script default)")
+        self.travel.setValue(event.travel_ms if event.travel_ms is not None else -1)
+        self.notes.setPlainText(event.notes)
+        kind = event.type_enum()
+        if kind == EventType.SWIPE:
+            self.swipe_note.setText(_swipe_inspector_note(event))
+            self.swipe_note.setVisible(True)
+        self.match.setVisible(kind == EventType.WAIT_PIXEL)
+        self.match_label.setVisible(kind == EventType.WAIT_PIXEL)
 
     def _swatch(self) -> None:
         color = QColorDialog.getColor(QColor(self.color.text() or "#34C759"), self, "Trigger colour")
@@ -476,9 +1036,19 @@ class Inspector(QWidget):
             self.active.delay_ms = self.delay.value()
             self.active.x = self.x_box.value()
             self.active.y = self.y_box.value()
+            self.active.dx = self.dx_box.value()
+            self.active.dy = self.dy_box.value()
+            if self.active.type_enum() == EventType.SWIPE:
+                self.active.app = self.app_name.text().strip()
+                self.active.bundle_id = self.bundle_edit.text().strip()
+                apply_swipe_direction(self.active, self.direction.currentText())
+                self.swipe_note.setText(_swipe_inspector_note(self.active))
+            else:
+                self.active.direction = self.direction.currentText()
             self.active.button = self.button.currentText()
             self.active.pressed = self.pressed.currentText() == "down"
-            self.active.key = self.key.text()
+            if self.active.type_enum() != EventType.SWIPE:
+                self.active.key = self.key.text()
             self.active.color = self.color.text()
             self.active.tolerance = self.tolerance.value()
             self.active.match = self.match.currentText()
@@ -486,30 +1056,71 @@ class Inspector(QWidget):
             self.active.path = None if self.path.currentText().startswith("(") else self.path.currentText()
             self.active.travel_ms = None if self.travel.value() < 0 else self.travel.value()
             self.active.notes = self.notes.toPlainText()
-        self.script.play_mode = self.play_mode.currentData()
+        self.script.play_mode = self.play_mode.currentData() or PlayMode.ABSOLUTE.value
         self.script.loop.count = self.loops.value()
         self.script.loop.gap_ms = self.gap.value()
         self.script.loop.return_to_origin = self.return_origin.isChecked()
         self.script.loop.park_before_cycle = self.park.isChecked()
         preset = self.preset.currentText()
+        self.script.humanize.speed = float(self.speed.value())
         if preset != self.script.humanize.preset:
             self.script.humanize.apply_preset(preset)
-        self.script.humanize.speed = float(self.speed.currentText())
-        self.script.humanize.path = self.human_path.currentText()
-        if preset != HumanizePreset.CUSTOM.value and (
-            self.human_path.currentText() != self.script.humanize.path
-        ):
-            self.script.humanize.preset = HumanizePreset.CUSTOM.value
+            self.script.humanize.speed = float(self.speed.value())
+            self._guard = True
+            try:
+                self.human_path.setCurrentText(self.script.humanize.path)
+            finally:
+                self._guard = False
+        else:
+            self.script.humanize.path = self.human_path.currentText()
+            if preset != HumanizePreset.CUSTOM.value:
+                probe = HumanizeSettings()
+                probe.apply_preset(preset)
+                if self.script.humanize.path != probe.path:
+                    self.script.humanize.preset = HumanizePreset.CUSTOM.value
+                    self._guard = True
+                    try:
+                        self.preset.setCurrentText(HumanizePreset.CUSTOM.value)
+                    finally:
+                        self._guard = False
         self.values_changed.emit()
 
 
+def _swipe_inspector_note(event: Event) -> str:
+    if is_app_switch(event):
+        fallback = space_fallback_label(event) if event.key or event.direction in {"left", "right"} else ""
+        if fallback:
+            return (
+                f"Replay activates {event.app or event.bundle_id}. "
+                f"{fallback} is only used if activate fails."
+            )
+        return f"Replay activates {event.app or event.bundle_id}. That is not a four-finger swipe."
+    inferred = "inferred" in (event.notes or "").lower()
+    shortcut = event.key or swipe_shortcut_key(event.direction or "right", inferred=inferred)
+    body = event.notes or (
+        "Replay posts Control+Arrow (System Settings → Keyboard Shortcuts → "
+        "Mission Control → Move left/right a space). Inferred right/left is the "
+        "space axis. Finger-left is Control+Right. Control+Up is Mission Control. "
+        "Flip Direction if Replay goes the wrong way."
+    )
+    pretty = space_fallback_label(event)
+    if pretty.lower() not in body.lower() and shortcut.lower() not in body.lower():
+        return f"Replay {pretty}. {body}"
+    return body
+
+
 def add_event_of_type(kind: EventType) -> Event:
-    event = Event(type=kind.value, name=EVENT_LABELS[kind])
+    """Factory for + Add. New types: EventType, TYPE_COLOR, INSPECTOR_GROUPS, then defaults here."""
+    event = Event(type=kind.value, name=EVENT_LABELS.get(kind, kind.value.replace("_", " ").title()))
     if kind == EventType.WAIT:
         event.delay_ms = 250
     if kind == EventType.WAIT_PIXEL:
         event.color = "#34C759"
         event.match = "is"
-    if kind == EventType.KEY_DOWN:
+    if kind in {EventType.KEY_DOWN, EventType.KEY_UP}:
         event.key = "enter"
+    if kind == EventType.CLICK:
+        event.duration_ms = 70
+    if kind == EventType.SWIPE:
+        apply_swipe_direction(event, "left")
     return event
