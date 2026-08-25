@@ -1,14 +1,10 @@
-# Motif — mouse & keyboard recorder, auto clicker, and macro recorder for Mac
+# Motif — mouse & keyboard recorder, auto clicker, and macro recorder
 
-Motif records, edits, and replays mouse movement, clicks, and keystrokes. It is a Mac-first auto clicker and mouse recorder (also Windows and Linux): capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
+Motif records, edits, and replays mouse movement, clicks, and keystrokes on **Windows, macOS, and Linux**. Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
 
-Also known as a Mac auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
+Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
 ## Start
-
-**Mac:** open `Motif.app` (preferred — permissions attach to Motif). If it is missing, run `python3 start.py app` once, then open `Motif.app`. `Motif.command` is a fallback and will open `Motif.app` when it exists.
-
-**Windows:** double-click `start.cmd`
 
 **Any terminal:**
 
@@ -16,7 +12,23 @@ Also known as a Mac auto clicker, keyboard recorder, click recorder, mouse macro
 python3 start.py
 ```
 
+**Windows:** double-click `start.cmd`
+
+**Linux:** `python3 start.py` (or `./start`)
+
+**macOS:** open `Motif.app` (preferred — permissions attach to Motif). If it is missing, run `python3 start.py app` once, then open `Motif.app`. `Motif.command` is a fallback and will open `Motif.app` when it exists.
+
 Requires **Python 3.11+**. The first run creates `.venv`, installs Motif, and opens the window. After that, the same command just starts. A terminal start on Mac still attributes Accessibility to Terminal/Python — use `Motif.app` for recording.
+
+## macOS-only extras
+
+The core recorder works on all three platforms. These extras stay on Mac and are skipped (not faked) on Windows and Linux:
+
+- **Switch app** and **Spaces** — NSWorkspace / four-finger Mission Control capture and app activate
+- **Motif.app** and **Install to Applications** — so Accessibility, Input Monitoring, and Screen Recording attach to Motif instead of Terminal
+- Permission HUD / TCC prompts
+
+Replay of a Mac-recorded Switch app / Space row on Windows or Linux does not invent a virtual-desktop gesture. It may post the stored Control+Arrow shortcut, or no-op if there is nothing to activate.
 
 ## Motif.app and Applications
 
@@ -82,7 +94,7 @@ Motifs are saved as `.motif.json`. Coordinates are stored relative to a **zero-g
 
 Local control is **off by default** so macOS does not prompt for Local Network access. Recording and replay work without it.
 
-**Motif.app must be running.** Then turn on **Motif → Enable Local Control (localhost)** (or Preferences). Other programs on this machine can call:
+**Motif must be running.** Then turn on **Motif → Enable Local Control (localhost)** (or Preferences). Other programs on this machine can call:
 
 ```
 http://127.0.0.1:7842
@@ -123,7 +135,7 @@ curl -X POST http://127.0.0.1:7842/load \
   -d '{"path":"/absolute/path/to/script.motif.json"}'
 ```
 
-**Keyboard Maestro / Shortcuts:** add a Run Shell Script action and paste one of the `curl` lines. Motif.app must already be open with local control on.
+**Keyboard Maestro / Shortcuts (macOS):** add a Run Shell Script action and paste one of the `curl` lines. Motif must already be open with local control on.
 
 **CLI** (same machine): `motif play FILE` or `python3 start.py play FILE` talks to the running app when local control is on; if the GUI is not reachable it falls back to headless replay. `motif play FILE --headless` skips the API. `motif stop`, `motif status`, and `motif record` also hit the local server.
 
@@ -133,4 +145,4 @@ MotifClient().play()
 MotifClient().play("/absolute/path/to/script.motif.json", loops=3)
 ```
 
-When you trigger through the API, Accessibility / Input Monitoring / Screen Recording belong to **Motif.app**. Headless `motif play` (no GUI) attributes those to Terminal or Python instead.
+On macOS, when you trigger through the API, Accessibility / Input Monitoring / Screen Recording belong to **Motif.app**. Headless `motif play` (no GUI) attributes those to Terminal or Python instead.

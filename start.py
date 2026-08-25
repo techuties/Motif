@@ -161,9 +161,10 @@ def usage() -> None:
   python3 start.py play FILE    play a saved motif
   python3 start.py help
 
+Windows: double-click start.cmd
+Linux: python3 start.py
 Mac: open Motif.app (preferred). Motif.command is a fallback.
 Copying Motif.app in Finder to /Applications will break — use install.
-Windows: double-click start.cmd
 
 F9 record · F10 replay · ⌃⌥Esc stop (Control+Option+Escape)
 """

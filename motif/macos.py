@@ -48,6 +48,27 @@ def can_monitor_input() -> bool:
     return trusted or listen
 
 
+def listener_start_help() -> str:
+    """Why input listeners failed, in platform-honest language."""
+    if sys.platform == "darwin":
+        return (
+            "Could not start the input listeners.\n\n"
+            "Grant Accessibility and Input Monitoring to Motif, then quit "
+            "and open Motif.app again."
+        )
+    if sys.platform.startswith("linux"):
+        return (
+            "Could not start the input listeners.\n\n"
+            "On X11, Motif can record globally. On Wayland, global hooks are "
+            "restricted — use an X11 session. You may also need to be in the "
+            "input group."
+        )
+    return (
+        "Could not start the input listeners.\n\n"
+        "Allow Motif through Windows security prompts, then try again."
+    )
+
+
 def is_motif_app() -> bool:
     """True when this process is Motif.app (TCC should list Motif)."""
     import os
@@ -73,15 +94,27 @@ def is_motif_app() -> bool:
 
 
 def permissions_help() -> str:
+    if sys.platform == "darwin":
+        return (
+            "Grant these to the Motif you opened — project Motif.app or "
+            "/Applications/Motif.app — not Terminal, Motif.command, or Python:\n\n"
+            "1. System Settings → Privacy & Security → Accessibility\n"
+            "2. System Settings → Privacy & Security → Input Monitoring\n"
+            "3. System Settings → Privacy & Security → Screen Recording  "
+            "(only needed for colour triggers)\n\n"
+            "Local Network is not required. Open that Motif, tick it in each list, "
+            "then quit and open the same Motif.app again."
+        )
+    if sys.platform.startswith("linux"):
+        return (
+            "On X11, Motif can record globally.\n"
+            "On Wayland, global hooks are restricted — use an X11 session for "
+            "full record/replay.\n"
+            "uinput / input group access may also be required."
+        )
     return (
-        "Grant these to the Motif you opened — project Motif.app or "
-        "/Applications/Motif.app — not Terminal, Motif.command, or Python:\n\n"
-        "1. System Settings → Privacy & Security → Accessibility\n"
-        "2. System Settings → Privacy & Security → Input Monitoring\n"
-        "3. System Settings → Privacy & Security → Screen Recording  "
-        "(only needed for colour triggers)\n\n"
-        "Local Network is not required. Open that Motif, tick it in each list, "
-        "then quit and open the same Motif.app again."
+        "On Windows, allow Motif through security prompts. High-DPI scaling "
+        "is handled automatically."
     )
 
 
@@ -142,7 +175,7 @@ def _warm_layout() -> None:
 
 def _install_tis_guard() -> None:
     global _PATCHED, _ORIGINAL_CONTEXT
-    if _PATCHED:
+    if _PATCHED or sys.platform != "darwin":
         return
     from pynput._util import darwin as pynput_darwin
 
@@ -241,6 +274,8 @@ def post_space_switch(
 
 def frontmost_app_info() -> tuple[str, str]:
     """Localized name and bundle id of the frontmost app, if available."""
+    if sys.platform != "darwin":
+        return "", ""
     try:
         from AppKit import NSWorkspace
 
@@ -262,6 +297,8 @@ def frontmost_app_name() -> str:
 
 def current_app_identity() -> tuple[str, str]:
     """This process — used so Motif becoming key is not recorded as a switch."""
+    if sys.platform != "darwin":
+        return "", ""
     try:
         from AppKit import NSRunningApplication
 
@@ -288,6 +325,8 @@ def is_motif_application(name: str = "", bundle_id: str = "") -> bool:
 
 
 def app_from_notification(notification) -> tuple[str, str]:
+    if sys.platform != "darwin":
+        return "", ""
     try:
         from AppKit import NSWorkspaceApplicationKey
 
@@ -364,6 +403,8 @@ def _post_gesture_swipe(_direction: str) -> bool:
 
 def _arrow_event_flags():
     """Arrow keys need the Fn (and often numeric-pad) bit or macOS ignores them."""
+    if sys.platform != "darwin":
+        return 0
     from Quartz import kCGEventFlagMaskControl, kCGEventFlagMaskSecondaryFn
 
     flags = kCGEventFlagMaskControl | kCGEventFlagMaskSecondaryFn
@@ -415,6 +456,8 @@ def _post_control_arrow_event(arrow: str) -> bool:
 
 def _post_system_events_arrow(arrow: str) -> bool:
     """Accessibility fallback: System Events types Control+Arrow."""
+    if sys.platform != "darwin":
+        return False
     keycode = _ARROW_KEYCODES.get(arrow)
     if keycode is None:
         return False
@@ -435,6 +478,8 @@ def _post_system_events_arrow(arrow: str) -> bool:
 
 def _space_fingerprint() -> tuple:
     """On-screen window ids — changes when the active space / fullscreen app does."""
+    if sys.platform != "darwin":
+        return ()
     try:
         from Quartz import CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowListOptionOnScreenOnly
 
@@ -582,29 +627,30 @@ class SwipeCapture:
         self._cancel_pending_timer()
         with self._lock:
             self._pending_space = False
-        for mon in self._monitors:
-            try:
-                from AppKit import NSEvent
+        if sys.platform == "darwin":
+            for mon in self._monitors:
+                try:
+                    from AppKit import NSEvent
 
-                NSEvent.removeMonitor_(mon)
-            except Exception:
-                pass
+                    NSEvent.removeMonitor_(mon)
+                except Exception:
+                    pass
+            if self._observer is not None and self._center is not None:
+                try:
+                    self._center.removeObserver_(self._observer)
+                except Exception:
+                    pass
+            loop = self._loop
+            if loop is not None:
+                try:
+                    from Quartz import CFRunLoopStop
+
+                    CFRunLoopStop(loop)
+                except Exception:
+                    pass
         self._monitors.clear()
-        if self._observer is not None and self._center is not None:
-            try:
-                self._center.removeObserver_(self._observer)
-            except Exception:
-                pass
         self._observer = None
         self._center = None
-        loop = self._loop
-        if loop is not None:
-            try:
-                from Quartz import CFRunLoopStop
-
-                CFRunLoopStop(loop)
-            except Exception:
-                pass
         if self._tap_thread and self._tap_thread.is_alive():
             self._tap_thread.join(timeout=1.0)
         self._tap_thread = None
@@ -735,6 +781,8 @@ class SwipeCapture:
         return self._take_hint()
 
     def _start_ns_monitors(self) -> None:
+        if sys.platform != "darwin":
+            return
         try:
             from AppKit import (
                 NSEvent,
@@ -779,6 +827,8 @@ class SwipeCapture:
             pass
 
     def _start_space_observer(self) -> None:
+        if sys.platform != "darwin":
+            return
         try:
             from AppKit import (
                 NSWorkspace,
@@ -824,6 +874,8 @@ class SwipeCapture:
             self._center = None
 
     def _start_gesture_tap(self) -> None:
+        if sys.platform != "darwin":
+            return
         try:
             from Quartz import (
                 CFMachPortCreateRunLoopSource,

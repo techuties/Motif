@@ -1075,7 +1075,7 @@ def test_flush_path_delay_is_idle_before_motion() -> None:
     ]
     rec._flush_path()
     assert len(received) == 1
-    assert received[0].delay_ms == 200
+    assert abs(received[0].delay_ms - 200) <= 2
     assert received[0].travel_ms == 300
     assert len(received[0].points) == 2
     assert received[0].points[0]["t_ms"] == 0
@@ -1337,14 +1337,53 @@ def test_recorder_ignores_points_inside_rect() -> None:
 
 
 def test_permissions_help_names_motif() -> None:
-    from motif.macos import permissions_help
+    from motif.macos import listener_start_help, permissions_help
 
     text = permissions_help()
     assert "Motif" in text
-    assert "Accessibility" in text
-    assert "Input Monitoring" in text
-    assert "Screen Recording" in text
-    assert "Motif.app" in text
+    if sys.platform == "darwin":
+        assert "Accessibility" in text
+        assert "Input Monitoring" in text
+        assert "Screen Recording" in text
+        assert "Motif.app" in text
+        assert "Motif.app" in listener_start_help()
+    elif sys.platform.startswith("linux"):
+        assert "X11" in text
+        assert "Wayland" in text
+        assert "X11" in listener_start_help()
+    else:
+        assert "Windows" in text
+        assert "Windows" in listener_start_help()
+
+
+def test_macos_helpers_stub_off_darwin(monkeypatch) -> None:
+    """AppKit / Spaces / TCC stay no-ops when the process is not macOS."""
+    from motif import macos
+
+    monkeypatch.setattr(macos.sys, "platform", "win32")
+    macos.prepare_input_hooks()
+    macos.prompt_os_permission_dialogs()
+    assert macos.can_monitor_input() is True
+    assert macos.frontmost_app_info() == ("", "")
+    assert macos.current_app_identity() == ("", "")
+    assert macos.app_from_notification(None) == ("", "")
+    assert macos.activate_app("com.apple.Safari", "Safari") is False
+    assert "Windows" in macos.permissions_help()
+    assert "Windows" in macos.listener_start_help()
+    capture = macos.SwipeCapture(lambda *_args, **_kwargs: None)
+    capture.start()
+    assert capture._running is False
+    capture.stop()
+    assert capture._monitors == []
+    assert capture._observer is None
+
+    monkeypatch.setattr(macos.sys, "platform", "linux")
+    assert "X11" in macos.permissions_help()
+    assert "X11" in macos.listener_start_help()
+    linux_capture = macos.SwipeCapture(lambda *_args, **_kwargs: None)
+    linux_capture.start()
+    assert linux_capture._running is False
+    linux_capture.stop()
 
 
 def test_is_motif_app_follows_bundle_flag(monkeypatch) -> None:

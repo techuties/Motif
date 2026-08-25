@@ -33,6 +33,7 @@ from motif.macos import (
     SwipeCapture,
     app_from_notification,
     frontmost_app_info,
+    listener_start_help,
     prepare_input_hooks,
 )
 from motif.models import (
@@ -62,6 +63,8 @@ def _pump_main_loop() -> None:
             return
     except Exception:
         pass
+    if sys.platform != "darwin":
+        return
     try:
         from Foundation import NSDate, NSRunLoop
 
@@ -172,11 +175,7 @@ class Recorder:
             raise
         except Exception as exc:
             self.stop()
-            raise RecorderStartError(
-                "Could not start the input listeners.\n\n"
-                "Grant Accessibility and Input Monitoring to Motif, then quit "
-                "and open Motif.app again."
-            ) from exc
+            raise RecorderStartError(listener_start_help()) from exc
 
     def _start_one(self, listener, name: str) -> None:
         listener.start()

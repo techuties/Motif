@@ -1,7 +1,7 @@
 [project]
 name = "motif"
 version = "1.0.0"
-description = "Motif: Mac-first mouse and keyboard recorder, auto clicker, and macro recorder with a visual editor"
+description = "Motif: mouse and keyboard recorder, auto clicker, and macro recorder for Windows, macOS, and Linux"
 readme = "README.md"
 requires-python = ">=3.11"
 keywords = [

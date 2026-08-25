@@ -1291,12 +1291,12 @@ class MainWindow(QMainWindow):
         form = QFormLayout(dialog)
         api_box = QCheckBox("Enable local control (localhost)")
         api_box.setChecked(self.api.running)
-        api_box.setToolTip("Off by default. Avoids a macOS Local Network prompt. Only needed for scripts that call Motif over HTTP.")
+        api_box.setToolTip("Off by default. Only needed for scripts that call Motif over HTTP.")
         form.addRow(api_box)
         form.addRow(
             hint_label(
-                "Local Network permission is not required for recording or replay. "
-                "Turn local control on only if another program on this Mac should drive Motif."
+                "Local control is not required for recording or replay. "
+                "Turn it on only if another program on this machine should drive Motif."
             )
         )
         if sys.platform == "darwin":
@@ -1407,25 +1407,14 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def show_permissions(self) -> None:
-        if sys.platform == "darwin":
-            text = permissions_help()
-        elif sys.platform.startswith("linux"):
-            text = (
-                "On X11, Motif can record globally.\n"
-                "On Wayland, global hooks are restricted — use an X11 session for full record/replay.\n"
-                "uinput / input group access may also be required."
-            )
-        else:
-            text = "On Windows, allow Motif through security prompts. High-DPI scaling is handled automatically."
-        QMessageBox.information(self, "Permissions", text)
+        QMessageBox.information(self, "Permissions", permissions_help())
 
     def show_api_help(self) -> None:
         state = "on" if self.api.running else "off"
         QMessageBox.information(
             self,
             "External control",
-            "Local control is off by default so macOS does not ask for Local Network "
-            "permission. Recording and replay do not need it.\n\n"
+            "Local control is off by default. Recording and replay do not need it.\n\n"
             "Turn it on from Motif → Enable Local Control (localhost) or "
             f"Motif → Preferences. It is currently {state}.\n\n"
             "When on, other programs on this machine can drive Motif at 127.0.0.1 "
