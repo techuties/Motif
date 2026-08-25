@@ -1,7 +1,7 @@
 [project]
 name = "motif"
 version = "1.0.0"
-description = "Motif: mouse and keyboard recorder, auto clicker, and macro recorder for Windows, macOS, and Linux"
+description = "Motif: mouse and keyboard recorder, auto clicker, and macro recorder. Tested and proven on macOS."
 readme = "README.md"
 requires-python = ">=3.11"
 keywords = [
@@ -23,8 +23,6 @@ keywords = [
     "automation",
     "pynput",
     "macos",
-    "windows",
-    "linux",
 ]
 dependencies = [
     "PySide6>=6.6.0",

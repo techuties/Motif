@@ -1,10 +1,12 @@
 # Motif — mouse & keyboard recorder, auto clicker, and macro recorder
 
-Motif records, edits, and replays mouse movement, clicks, and keystrokes on **Windows, macOS, and Linux**. Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
+Motif records, edits, and replays mouse movement, clicks, and keystrokes. **Tested and proven on macOS.** Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
 
 Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
 ## Start
+
+**macOS:** open `Motif.app` (preferred — permissions attach to Motif). If it is missing, run `python3 start.py app` once, then open `Motif.app`. `Motif.command` is a fallback and will open `Motif.app` when it exists.
 
 **Any terminal:**
 
@@ -12,23 +14,19 @@ Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, o
 python3 start.py
 ```
 
-**Windows:** double-click `start.cmd`
-
-**Linux:** `python3 start.py` (or `./start`)
-
-**macOS:** open `Motif.app` (preferred — permissions attach to Motif). If it is missing, run `python3 start.py app` once, then open `Motif.app`. `Motif.command` is a fallback and will open `Motif.app` when it exists.
+`start.cmd` and a Linux launcher exist; the code can start elsewhere, but it is not tested there.
 
 Requires **Python 3.11+**. The first run creates `.venv`, installs Motif, and opens the window. After that, the same command just starts. A terminal start on Mac still attributes Accessibility to Terminal/Python — use `Motif.app` for recording.
 
-## macOS-only extras
+## macOS extras
 
-The core recorder works on all three platforms. These extras stay on Mac and are skipped (not faked) on Windows and Linux:
+These stay on Mac and are skipped (not faked) elsewhere:
 
 - **Switch app** and **Spaces** — NSWorkspace / four-finger Mission Control capture and app activate
 - **Motif.app** and **Install to Applications** — so Accessibility, Input Monitoring, and Screen Recording attach to Motif instead of Terminal
 - Permission HUD / TCC prompts
 
-Replay of a Mac-recorded Switch app / Space row on Windows or Linux does not invent a virtual-desktop gesture. It may post the stored Control+Arrow shortcut, or no-op if there is nothing to activate.
+Replay of a Mac-recorded Switch app / Space row off Mac does not invent a virtual-desktop gesture. It may post the stored Control+Arrow shortcut, or no-op if there is nothing to activate.
 
 ## Motif.app and Applications
 
@@ -79,10 +77,6 @@ On **macOS**, grant these to **the Motif you opened** (project `Motif.app` or `/
 Open Motif.app first so it appears in those lists. Use Help → Permissions in the app. Then **quit Motif and open the same Motif.app again** so the new rights apply.
 
 If you previously allowed Terminal or Python, you can leave those on; Motif.app still needs its own ticks.
-
-On **Linux**, global hooks work on X11. Wayland restricts them; use an X11 session for full record/replay.
-
-On **Windows**, allow Motif through security prompts. High-DPI scaling is handled automatically.
 
 ## Scripts
 
