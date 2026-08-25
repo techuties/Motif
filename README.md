@@ -80,25 +80,59 @@ Motifs are saved as `.motif.json`. Coordinates are stored relative to a **zero-g
 
 **Replay at recorded origin** (default) plays back on the same display(s) you recorded, even if the Motif window is on another screen. **Replay from current cursor** shifts the whole path to wherever the mouse is — if you click Replay on a second monitor, that is where it runs.
 
-## External control
+## External trigger / Local API
 
 Local control is **off by default** so macOS does not prompt for Local Network access. Recording and replay work without it.
 
-To let other programs on this machine call Motif, turn on **Motif → Enable Local Control (localhost)** (or Preferences). Then they can use `http://127.0.0.1:7842`.
+**Motif.app must be running.** Then turn on **Motif → Enable Local Control (localhost)** (or Preferences). Other programs on this machine can call:
 
-There is **no authentication**. The server binds to localhost only. Do not expose that port (no reverse proxy, no `0.0.0.0`). `GET /script` returns the current motif, including recorded key names.
+```
+http://127.0.0.1:7842
+```
+
+There is **no authentication**. The server binds to localhost only. Do not expose that port (no reverse proxy, no `0.0.0.0`). Browser pages from other origins are rejected; `curl` and local scripts (no `Origin` header) are the intended clients.
+
+| Method | Path | What it does |
+| --- | --- | --- |
+| GET | `/health` | `{ok, app}` |
+| GET | `/status` | recording / playing, event count, current motif name |
+| GET | `/script` | current motif JSON (includes recorded key names) |
+| POST | `/play` | play the loaded motif; optional JSON `path` and `loops` |
+| POST | `/stop` | stop play or record |
+| POST | `/record` | toggle recording |
+| POST | `/load` | load a file (`{"path":"…"}`) without playing |
+
+There is **no play-by-name**. `/status` reports the current motif `name`; `POST /play` only accepts `path` and `loops`.
 
 ```bash
-curl http://127.0.0.1:7842/status
+# currently loaded motif
 curl -X POST http://127.0.0.1:7842/play
+
+# a file (loads it, then plays)
+curl -X POST http://127.0.0.1:7842/play \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/absolute/path/to/script.motif.json"}'
+
+# stop
 curl -X POST http://127.0.0.1:7842/stop
+
+# optional: loops, or load without playing
+curl -X POST http://127.0.0.1:7842/play \
+  -H "Content-Type: application/json" \
+  -d '{"loops":3}'
+curl -X POST http://127.0.0.1:7842/load \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/absolute/path/to/script.motif.json"}'
 ```
+
+**Keyboard Maestro / Shortcuts:** add a Run Shell Script action and paste one of the `curl` lines. Motif.app must already be open with local control on.
+
+**CLI** (same machine): `motif play FILE` or `python3 start.py play FILE` talks to the running app when local control is on; if the GUI is not reachable it falls back to headless replay. `motif play FILE --headless` skips the API. `motif stop`, `motif status`, and `motif record` also hit the local server.
 
 ```python
 from motif import MotifClient
 MotifClient().play()
+MotifClient().play("/absolute/path/to/script.motif.json", loops=3)
 ```
 
-```bash
-python3 start.py play script.motif.json --loops 3
-```
+When you trigger through the API, Accessibility / Input Monitoring / Screen Recording belong to **Motif.app**. Headless `motif play` (no GUI) attributes those to Terminal or Python instead.
