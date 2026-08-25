@@ -1,7 +1,7 @@
 [project]
 name = "motif"
 version = "1.0.0"
-description = "Motif: cross-platform mouse and keyboard recorder, auto-clicker, and macro replay with a visual editor"
+description = "Motif: Mac-first mouse and keyboard recorder, auto clicker, and macro recorder with a visual editor"
 readme = "README.md"
 requires-python = ">=3.11"
 keywords = [
@@ -9,12 +9,16 @@ keywords = [
     "auto-clicker",
     "autoclicker",
     "auto clicker",
+    "mac auto clicker",
     "mouse-recorder",
     "keyboard-recorder",
     "macro-recorder",
+    "click recorder",
+    "mouse macro",
     "input-recorder",
     "input-replay",
     "macro replay",
+    "tinytask",
     "replay",
     "automation",
     "pynput",

@@ -1,10 +1,8 @@
-# Motif — mouse & keyboard recorder, auto-clicker, and macro replay
+# Motif — mouse & keyboard recorder, auto clicker, and macro recorder for Mac
 
-Motif records, edits, and replays mouse and keyboard input on macOS, Windows, and Linux. Use it as a mouse recorder, keyboard recorder, auto-clicker, or macro recorder: visual timeline, colour-pixel triggers, looping, and humanized playback.
+Motif records, edits, and replays mouse movement, clicks, and keystrokes. It is a Mac-first auto clicker and mouse recorder (also Windows and Linux): capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
 
-Also called: auto clicker, input recorder, macro replay, input replay, desktop automation.
-
-GitHub topics (paste when you publish): `motif` `auto-clicker` `autoclicker` `mouse-recorder` `keyboard-recorder` `macro-recorder` `input-recorder` `input-replay` `automation` `pynput` `macos`
+Also known as a Mac auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
 ## Start
 
