@@ -1,6 +1,6 @@
 # Motif — mouse & keyboard recorder, auto clicker, and macro recorder
 
-Motif records, edits, and replays mouse movement, clicks, and keystrokes. **Core recorder/replay works on macOS, Linux, and Windows.** macOS and Linux are GUI + pytest smoke-tested; Windows uses `start.cmd` (packaging/EXE still forthcoming). Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
+Motif is a **mouse & keyboard recorder**, auto clicker, and macro tool: record a take, edit the event list, replay it. **Works on macOS, Linux, and Windows** (Python core). macOS and Linux are GUI + pytest smoke-tested; Windows runs via `start.cmd` (portable EXE still forthcoming). Visual timeline, image/colour waits with optional click-on-find, light branches, humanized playback, tray/schedules, and an opt-in local API — TinyTask-style, not a Keyboard Maestro clone.
 
 Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
@@ -21,6 +21,30 @@ Transport strip:
 ![Motif transport](docs/media/motif-transport.png)
 
 Day and High Contrast stills: [`motif-day.png`](docs/media/motif-day.png) · [`motif-high-contrast.png`](docs/media/motif-high-contrast.png)
+
+
+## What Motif can do
+
+TinyTask-style **record → edit → replay** for mouse and keyboard — not a full Keyboard Maestro replacement.
+
+| Capability | What you get |
+| --- | --- |
+| **Record & replay** | Mouse moves, clicks, scrolls, keystrokes. Hotkeys **F9** record · **F10** replay · **⌃⌥Esc** stop |
+| **Edit the take** | Event list + inspector, skip/reorder/duplicate, filter, visual path & screen history |
+| **Loops & speed** | Cycle count and playback speed on the transport |
+| **Humanize** | Feel presets: **Precise** / **Natural** / **Cautious** (path + timing jitter) |
+| **Origin-relative coords** | Zero-ground origin so loops stay aligned; replay at recorded origin or from the current cursor |
+| **Smart waits** | Wait for a **colour** or an **image** template; optional **click where it matched** (anchor corners/center) |
+| **Light branches** | Event `label` + `on_found` / `on_miss`: continue, stop, or `goto:label` (jump-capped) |
+| **Window-relative (smart-rec)** | Optional coords tied to a window — strongest on **macOS**; Linux/Windows degrade with a clear status |
+| **Pro edit** | Split / merge moves, stretch delays; denser stroke sampling near clicks; preserve micro-jitter |
+| **Display fingerprint** | Warns if the monitor layout changed since capture |
+| **Tray, schedules, hotkey library** | Tray Show/Record/Replay last/Quit; daily or delay play while Motif runs; bind `.motif.json` files to custom global hotkeys |
+| **Local API** | Opt-in `127.0.0.1:7842` for load/play/record/stop from scripts (no auth; localhost only) |
+| **Accessibility** | Themes (Night / Day / High Contrast), text scale, full keyboard UI, WCAG-checked colours |
+| **Platforms** | **macOS** (primary: Spaces, app switch, `Motif.app`) · **Linux** (GUI + pytest smoke) · **Windows** (same Python core via `start.cmd`; portable EXE later) |
+
+Ship notes: [`docs/SHIP.md`](docs/SHIP.md) · dual-OS GUI smoke: `scripts/gui_smoke.py` · evidence grabs: [`docs/media/smoke/`](docs/media/smoke/)
 
 ## Start
 
@@ -166,7 +190,7 @@ If you previously allowed Terminal or Python, you can leave those on; Motif.app 
 
 **Pro edit:** Edit menu — Split Move, Merge Moves, Stretch Delays ×1.5 (`Ctrl+Shift+D`) on the selection.
 
-**When image:** add a `wait_image` step with a template PNG path; replay waits until that image appears (mss + Pillow). Colour pixel waits remain available.
+**When image / colour:** `wait_image` and colour waits; optional **click when found** with corner/center anchor, plus continue/stop/`goto:label` branches on found or miss.
 
 
 Motifs are saved as `.motif.json`. Coordinates are stored relative to a **zero-ground origin** so loops stay aligned if you move that origin. Values are **global logical points** on the whole virtual desktop (extra monitors included, Retina points not physical pixels).
@@ -175,9 +199,9 @@ Motifs are saved as `.motif.json`. Coordinates are stored relative to a **zero-g
 
 
 
-## Roadmap packs A–E (shipped)
+## Capability packs (A–E)
 
-Market packs landed on `dev` without turning Motif into Keyboard Maestro:
+Shipped as focused packs — still TinyTask-simple, not a scripting IDE:
 
 - **A — Smart image click + branches** — `wait_image` / `wait_pixel` can click the match (anchor: center/tl/tr/bl/br). Optional event `label` with `on_found` / `on_miss`: `continue` | `stop` | `goto:<label>` (goto jumps capped per run). Inspector fields for template, threshold, click-on-find, anchor, branches.
 - **B — Window-relative / smart-rec** — Optional mode stores window metadata and maps coords back into the live window on replay. macOS preferred (Quartz); Linux/Windows degrade with a clear status. Preferences + inspector toggle.
