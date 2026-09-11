@@ -1,0 +1,64 @@
+{
+  "platform": "offscreen",
+  "prefix": "mac",
+  "passed": 11,
+  "failed": 0,
+  "results": [
+    {
+      "step": "show_window",
+      "ok": true,
+      "detail": "visible=True size=1100x720"
+    },
+    {
+      "step": "load_example",
+      "ok": true,
+      "detail": "events=9 name=Welcome motif"
+    },
+    {
+      "step": "grab_night",
+      "ok": true,
+      "detail": "docs/media/smoke/mac-night.png"
+    },
+    {
+      "step": "cycle_themes",
+      "ok": true,
+      "detail": "mac-day.png,mac-hc.png,mac-night2.png"
+    },
+    {
+      "step": "text_scale",
+      "ok": true,
+      "detail": "scale=1.0"
+    },
+    {
+      "step": "inspector_a_b_fields",
+      "ok": true,
+      "detail": "wait_image_events=1 jitter=True winrel=True"
+    },
+    {
+      "step": "grab_features",
+      "ok": true,
+      "detail": "docs/media/smoke/mac-features.png"
+    },
+    {
+      "step": "tray_schedule",
+      "ok": true,
+      "detail": "tray=False schedules=1"
+    },
+    {
+      "step": "transport",
+      "ok": true,
+      "detail": "cycles=2 speed=1.5"
+    },
+    {
+      "step": "humanize",
+      "ok": true,
+      "detail": "preset=precise"
+    },
+    {
+      "step": "grab_final",
+      "ok": true,
+      "detail": "docs/media/smoke/mac-final.png"
+    }
+  ],
+  "out": "docs/media/smoke"
+}

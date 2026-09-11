@@ -1,6 +1,6 @@
 # Motif — mouse & keyboard recorder, auto clicker, and macro recorder
 
-Motif records, edits, and replays mouse movement, clicks, and keystrokes. **Tested on macOS and Linux.** Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
+Motif records, edits, and replays mouse movement, clicks, and keystrokes. **Core recorder/replay works on macOS, Linux, and Windows.** macOS and Linux are GUI + pytest smoke-tested; Windows uses `start.cmd` (packaging/EXE still forthcoming). Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
 
 Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
@@ -131,6 +131,18 @@ QT_QPA_PLATFORM=offscreen python -m pytest
 ```
 
 macOS remains the primary recorder/replay target (Accessibility / Spaces / Motif.app); Linux is smoke-tested for install, GUI launch, and the full pytest suite.
+
+
+
+## GUI smoke
+
+Exercise the window without Accessibility scripting:
+
+```bash
+python3 scripts/gui_smoke.py --out docs/media/smoke --prefix mac   # or linux
+```
+
+Uses Qt (`offscreen` or native). Writes theme grabs under `docs/media/smoke/` and a JSON summary. Live Motif can also be driven via localhost control (`/health`, `/load`, `/play`, `/record`, `/stop`) when enabled.
 
 ## Permissions
 
