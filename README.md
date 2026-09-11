@@ -64,6 +64,38 @@ python3 start.py help
 
 Hotkeys: **F9** record · **F10** replay · **⌃⌥Esc** stop (Control+Option+Escape on Mac, Control+Alt+Escape elsewhere). Esc still stops when Motif is focused.
 
+## Keyboard
+
+Every control is reachable with Tab — the transport included. **Ctrl+?** opens the full list in the app.
+
+| Keys | What it does |
+| --- | --- |
+| `F9` / `F10` | Record · Replay |
+| `⌃⌥Esc` | Stop, even when Motif is not focused |
+| `↑` `↓` | Select the previous / next step |
+| `Alt+↑` `Alt+↓` | Move the selected step |
+| `Space` | Skip or restore the selected step |
+| `Ctrl+D` · `Delete` | Duplicate · remove |
+| `Ctrl+F` | Filter steps (name, kind, key, app, or note) |
+| `Ctrl+L` | Jump to the step list |
+| `Ctrl+Shift+T` | Next theme |
+
+The Path and Screen History views take focus too: arrow keys step through the events drawn in them, so neither view is mouse-only.
+
+## Appearance and accessibility
+
+**View → Appearance**, or Preferences.
+
+- **Themes** — *TechUties Night* (default), *TechUties Day*, and *High Contrast*. Every text colour in all three clears WCAG AA against every surface it is drawn on, including disabled text on a selected row; body text clears AAA. `tests/test_engine.py` asserts the ratios, so a palette edit that breaks contrast fails the build.
+- **Text size** — 100 / 115 / 130 / 150 %. Qt stylesheet pixels do not follow the OS text-size setting, so Motif carries its own. Controls grow with the type, and the transport drops its preset chips before anything clips — the Cycles and Speed number boxes always remain.
+
+The toolbar reads in four zones, separated by hairline rules: **Record · Replay**, then **Stop** with the panic key, then **Cycles**, then **Speed**. Cycles and Speed are one control each — presets and a custom number box inside a single frame, not two widgets side by side — and every control in the row is the same height.
+- Screen readers get names and descriptions on every control, and each step reads as one line: position, kind, name, detail, timing, and whether it is skipped.
+- Focus is always visible: one amber ring, thicker in High Contrast.
+- Status is never colour alone — a skipped step says `Off`, and the selected point on a canvas gets a ring, not just a tint.
+
+Colours come from techuties.com: brand navy `#050A1F`, amber `#FF9A1A`, Inter where it is installed.
+
 ## Permissions
 
 On **macOS**, grant these to **the Motif you opened** (project `Motif.app` or `/Applications/Motif.app` — not Terminal, Motif.command, or Python):

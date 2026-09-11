@@ -8,12 +8,23 @@ import time
 from pathlib import Path
 from threading import Lock
 
-from PySide6.QtCore import QCoreApplication, QObject, QRect, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QCoreApplication,
+    QLocale,
+    QObject,
+    QRect,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QAction, QCloseEvent, QCursor, QFontDatabase, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -21,6 +32,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -76,6 +88,7 @@ from motif.storage import (
     save_script,
     save_settings,
 )
+from motif.ui import theme
 from motif.ui.theme import (
     BUTTON_HEIGHT,
     BUTTON_MIN_WIDTH,
@@ -84,7 +97,6 @@ from motif.ui.theme import (
     CLUSTER_PAD,
     CYCLE_MIN_WIDTH,
     CYCLE_SPIN_MIN,
-    QSS,
     SPACE_LG,
     SPACE_MD,
     SPACE_SM,
@@ -101,11 +113,16 @@ from motif.ui.widgets import (
     PathCanvas,
     ScreenHistoryView,
     add_event_of_type,
+    announce,
     apply_banner,
     apply_button_kind,
+    describe,
     hint_label,
+    kbd_label,
+    metric_label,
     polish,
     section_header,
+    separator,
 )
 
 
@@ -138,7 +155,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Motif")
         self.setMinimumSize(1040, 700)
-        self.resize(1280, 860)
+        self.resize(1360, 880)
         self.script = Script()
         self.path: Path | None = None
         self.dirty = False
@@ -183,6 +200,8 @@ class MainWindow(QMainWindow):
         self.list.currentItemChanged.connect(lambda *_: self._sync_selection())
         self.list.order_changed.connect(self._apply_order)
         self.list.delete_requested.connect(self.delete_event)
+        self.list.move_requested.connect(self.move_event)
+        self.list.toggle_requested.connect(self.toggle_event_enabled)
         self.inspector = Inspector()
         self.inspector.values_changed.connect(self._inspector_changed)
         self.inspector.pick_pixel.connect(self.begin_pixel_pick)
@@ -219,8 +238,29 @@ class MainWindow(QMainWindow):
             act = self.add_menu.addAction(EVENT_LABELS.get(kind, kind.value.replace("_", " ").title()))
             act.triggered.connect(lambda _, k=kind: self.add_event(k))
         self.add_btn.setMenu(self.add_menu)
+        describe(self.add_btn, "Add event", "Insert a step after the selected one.")
         add_row.addWidget(self.add_btn)
         events_l.addLayout(add_row)
+
+        # A long take is hundreds of rows; scrolling for one click is not a plan.
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(SPACE_SM)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setObjectName("eventFilter")
+        self.filter_edit.setPlaceholderText("Filter steps…  ⌘F")
+        self.filter_edit.setClearButtonEnabled(True)
+        describe(
+            self.filter_edit,
+            "Filter steps",
+            "Show only steps matching this text — name, kind, key, app, or note.",
+        )
+        self.filter_edit.textChanged.connect(self._apply_filter)
+        self.filter_count = metric_label("")
+        self.filter_count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        filter_row.addWidget(self.filter_edit, 1)
+        filter_row.addWidget(self.filter_count)
+        events_l.addLayout(filter_row)
         events_l.addWidget(self.list, 1)
 
         self.screen_box.setMinimumHeight(200)
@@ -252,8 +292,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.main_split, 1)
 
         self.status = QStatusBar()
+        self.status.setSizeGripEnabled(False)
+        # Transient messages used to wipe the run settings off screen. Keep the
+        # numbers pinned right so the message area is free to say what happened.
+        self.status_metrics = metric_label("")
+        describe(self.status_metrics, "Motif summary", "", tooltip=False)
+        self.status.addPermanentWidget(self.status_metrics)
         self.setStatusBar(self.status)
         self._apply_view_settings()
+        self.apply_appearance(
+            self.settings.get("theme", theme.DEFAULT_THEME),
+            self.settings.get("text_scale", 1.0),
+            persist=False,
+        )
         self.refresh()
         QTimer.singleShot(200, self._after_show)
 
@@ -264,6 +315,13 @@ class MainWindow(QMainWindow):
             ("Ctrl+Shift+S", self.save_script_as, False),
             ("Ctrl+Z", self.undo, False),
             ("Ctrl+D", self.duplicate_event, False),
+            ("Ctrl+F", self.focus_filter, False),
+            ("Ctrl+L", self.focus_events, False),
+            ("Ctrl+E", self.toggle_event_enabled, False),
+            ("Alt+Up", lambda: self.move_event(-1), False),
+            ("Alt+Down", lambda: self.move_event(1), False),
+            ("Ctrl+Shift+T", self.cycle_theme, False),
+            ("Ctrl+?", self.show_shortcuts, False),
             ("F9", self.toggle_record, True),
             ("F10", self.toggle_play, True),
             ("Esc", self.stop_all, True),
@@ -272,6 +330,7 @@ class MainWindow(QMainWindow):
             shortcut = QShortcut(QKeySequence(key), self, slot)
             if app_wide:
                 shortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._apply_tab_order()
         self._ignore_timer = QTimer(self)
         self._ignore_timer.setInterval(200)
         self._ignore_timer.timeout.connect(self._sync_ignore_region)
@@ -365,17 +424,46 @@ class MainWindow(QMainWindow):
         self.screen_view_act.triggered.connect(self._toggle_screen_view)
         view.addAction(self.path_view_act)
         view.addAction(self.screen_view_act)
+        view.addSeparator()
+
+        appearance = view.addMenu("Appearance")
+        self.theme_acts: dict[str, QAction] = {}
+        for palette in theme.THEMES.values():
+            act = QAction(palette.label, self)
+            act.setCheckable(True)
+            act.triggered.connect(lambda _, n=palette.name: self._set_theme(n))
+            appearance.addAction(act)
+            self.theme_acts[palette.name] = act
+        appearance.addSeparator()
+        self.scale_acts: dict[float, QAction] = {}
+        for value in theme.TEXT_SCALES:
+            label = theme.TEXT_SCALE_LABELS.get(value, f"{int(value * 100)}%")
+            act = QAction(f"Text: {label}", self)
+            act.setCheckable(True)
+            act.triggered.connect(lambda _, v=value: self._set_text_scale(v))
+            appearance.addAction(act)
+            self.scale_acts[value] = act
+        next_theme = view.addAction("Next Theme", self.cycle_theme)
+        next_theme.setShortcut(QKeySequence("Ctrl+Shift+T"))
 
         help_menu = self.menuBar().addMenu("Help")
         help_menu.addAction("Load Example Motif", self.load_example)
+        shortcuts_act = help_menu.addAction("Keyboard Shortcuts", self.show_shortcuts)
+        shortcuts_act.setShortcut(QKeySequence("Ctrl+?"))
         help_menu.addAction("Permissions", self.show_permissions)
         help_menu.addAction("External Control", self.show_api_help)
 
     def _lock_chrome(self, widget: QWidget, min_width: int, height: int = BUTTON_HEIGHT) -> None:
-        widget.setMinimumWidth(min_width)
-        widget.setFixedHeight(height)
+        """Fix the transport geometry — but never take a control out of Tab order.
+
+        These buttons used to be NoFocus, which made Record, Replay, Stop and every
+        chip unreachable by keyboard and invisible to focus-driven assistive tech.
+        Size stays fixed so the row cannot reflow mid-take; focus is restored.
+        """
+        widget.setMinimumWidth(theme.scaled(min_width))
+        widget.setFixedHeight(theme.scaled(height))
         widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def _cluster_label(self, text: str) -> QLabel:
         label = QLabel(text)
@@ -417,38 +505,50 @@ class MainWindow(QMainWindow):
         self.rec_btn.setObjectName("recordBtn")
         apply_button_kind(self.rec_btn, "record")
         self._lock_chrome(self.rec_btn, BUTTON_MIN_WIDTH)
-        self.rec_btn.setToolTip("Record mouse and keys  ·  F9")
+        describe(self.rec_btn, "Record", "Record mouse and keys  ·  F9")
         self.rec_btn.clicked.connect(self.toggle_record)
 
         self.replay_btn = QPushButton("Replay")
         self.replay_btn.setObjectName("replayBtn")
         apply_button_kind(self.replay_btn, "primary")
         self._lock_chrome(self.replay_btn, BUTTON_MIN_WIDTH)
-        self.replay_btn.setToolTip("Replay this motif once  ·  F10")
+        describe(self.replay_btn, "Replay", "Replay this motif once  ·  F10")
         self.replay_btn.clicked.connect(self.toggle_play)
 
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setObjectName("stopBtn")
         apply_button_kind(self.stop_btn, "ghost")
         self._lock_chrome(self.stop_btn, STOP_MIN_WIDTH)
-        self.stop_btn.setToolTip(f"Stop recording or replay  ·  {exit_combo_label()}")
+        describe(self.stop_btn, "Stop", f"Stop recording or replay  ·  {exit_combo_label()}")
         self.stop_btn.clicked.connect(self.stop_all)
 
-        self.exit_hint = QLabel(exit_combo_label())
-        self.exit_hint.setProperty("role", "muted")
-        self.exit_hint.setToolTip(
-            f"{exit_combo_words()} always stops recording or replay, even if Motif is not focused."
+        self.exit_hint = kbd_label(exit_combo_label())
+        self.exit_hint.setProperty("role", "kbd")
+        describe(
+            self.exit_hint,
+            "Panic key",
+            f"{exit_combo_words()} always stops recording or replay, even if Motif is not focused.",
         )
 
+        # --- Zone A: the two verbs, together, equal weight ------------------
         row.addWidget(self.rec_btn)
         row.addWidget(self.replay_btn)
+        row.addSpacing(SPACE_MD)
+        row.addWidget(separator())
+        row.addSpacing(SPACE_MD)
+
+        # --- Zone B: stopping. Stop and the panic key are one idea ----------
         row.addWidget(self.stop_btn)
         row.addWidget(self.exit_hint)
         row.addStretch(1)
 
+        # --- Zone C: Cycles -------------------------------------------------
         self.cycles_label = self._cluster_label("Cycles")
         row.addWidget(self.cycles_label)
 
+        # Presets and the number box are one setting, so they are one control:
+        # chips, a divider, then the custom slot, inside a single border. Side
+        # by side as two bordered widgets they read as two separate settings.
         self.cycles_cluster = QWidget()
         self.cycles_cluster.setObjectName("cyclesCluster")
         self.cycles_cluster.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
@@ -456,6 +556,11 @@ class MainWindow(QMainWindow):
         cycles_row.setContentsMargins(CLUSTER_PAD, CLUSTER_PAD, CLUSTER_PAD, CLUSTER_PAD)
         cycles_row.setSpacing(0)
         cycles_row.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+        self.cycle_chips = QWidget()
+        self.cycle_chips.setObjectName("cycleChips")
+        chips_row = QHBoxLayout(self.cycle_chips)
+        chips_row.setContentsMargins(0, 0, 0, 0)
+        chips_row.setSpacing(0)
         self.cycle_group = QButtonGroup(self)
         self.cycle_group.setExclusive(False)
         self.cycle_buttons: dict[int, QPushButton] = {}
@@ -471,11 +576,15 @@ class MainWindow(QMainWindow):
             btn.setAutoExclusive(False)
             apply_button_kind(btn, "cycle")
             self._lock_chrome(btn, CYCLE_MIN_WIDTH, CHIP_HEIGHT)
-            btn.setToolTip(cycle_tips[value])
+            describe(btn, f"Cycles: {CYCLE_LABELS[value]}", cycle_tips[value])
             btn.clicked.connect(lambda _, v=value: self._set_cycle_count(v))
             self.cycle_group.addButton(btn)
             self.cycle_buttons[value] = btn
-            cycles_row.addWidget(btn)
+            chips_row.addWidget(btn)
+        cycles_row.addWidget(self.cycle_chips)
+        self.cycles_divider = separator()
+        self.cycles_divider.setObjectName("clusterDivider")
+        cycles_row.addWidget(self.cycles_divider)
         self.cycles_spin = QSpinBox()
         self.cycles_spin.setObjectName("cyclesSpin")
         self.cycles_spin.setRange(0, 100000)
@@ -484,13 +593,17 @@ class MainWindow(QMainWindow):
         self.cycles_spin.setMinimumWidth(CYCLE_SPIN_MIN)
         self.cycles_spin.setFixedHeight(CHIP_HEIGHT)
         self.cycles_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.cycles_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.cycles_spin.setToolTip("Custom cycle count. 0 is forever.")
+        self.cycles_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        describe(self.cycles_spin, "Cycle count", "Custom cycle count. 0 is forever.")
+        self.cycles_label.setBuddy(self.cycles_spin)
         self.cycles_spin.valueChanged.connect(self._set_cycle_count)
+        cycles_row.addWidget(self.cycles_spin)
         row.addWidget(self.cycles_cluster)
-        row.addWidget(self.cycles_spin)
+        row.addSpacing(SPACE_MD)
+        row.addWidget(separator())
         row.addSpacing(SPACE_MD)
 
+        # --- Zone D: Speed --------------------------------------------------
         self.speed_label = self._cluster_label("Speed")
         row.addWidget(self.speed_label)
 
@@ -501,6 +614,11 @@ class MainWindow(QMainWindow):
         speed_row.setContentsMargins(CLUSTER_PAD, CLUSTER_PAD, CLUSTER_PAD, CLUSTER_PAD)
         speed_row.setSpacing(0)
         speed_row.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+        self.speed_chips = QWidget()
+        self.speed_chips.setObjectName("speedChips")
+        speed_chips_row = QHBoxLayout(self.speed_chips)
+        speed_chips_row.setContentsMargins(0, 0, 0, 0)
+        speed_chips_row.setSpacing(0)
         self.speed_group = QButtonGroup(self)
         self.speed_group.setExclusive(False)
         self.speed_buttons: dict[float, QPushButton] = {}
@@ -511,11 +629,19 @@ class MainWindow(QMainWindow):
             btn.setAutoExclusive(False)
             apply_button_kind(btn, "speed")
             self._lock_chrome(btn, CHIP_MIN_WIDTH, CHIP_HEIGHT)
-            btn.setToolTip("Playback speed. 1.0× is the recorded timing.")
+            describe(
+                btn,
+                f"Speed: {value:.1f} times",
+                "Playback speed. 1.0× is the recorded timing.",
+            )
             btn.clicked.connect(lambda _, v=value: self._set_playback_speed(v))
             self.speed_group.addButton(btn)
             self.speed_buttons[value] = btn
-            speed_row.addWidget(btn)
+            speed_chips_row.addWidget(btn)
+        speed_row.addWidget(self.speed_chips)
+        self.speed_divider = separator()
+        self.speed_divider.setObjectName("clusterDivider")
+        speed_row.addWidget(self.speed_divider)
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setObjectName("speedSpin")
         self.speed_spin.setRange(0.25, 4.0)
@@ -523,14 +649,18 @@ class MainWindow(QMainWindow):
         self.speed_spin.setDecimals(2)
         self.speed_spin.setValue(1.0)
         self.speed_spin.setSuffix("×")
+        # The chips next to it read "1.0×"; a locale comma here would make the
+        # same number look like two different settings.
+        self.speed_spin.setLocale(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
         self.speed_spin.setMinimumWidth(SPEED_SPIN_MIN)
         self.speed_spin.setFixedHeight(CHIP_HEIGHT)
         self.speed_spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.speed_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.speed_spin.setToolTip("Playback speed. 1.0× is the recorded timing.")
+        self.speed_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        describe(self.speed_spin, "Playback speed", "Playback speed. 1.0× is the recorded timing.")
+        self.speed_label.setBuddy(self.speed_spin)
         self.speed_spin.valueChanged.connect(self._set_playback_speed)
+        speed_row.addWidget(self.speed_spin)
         row.addWidget(self.speed_cluster)
-        row.addWidget(self.speed_spin)
 
         header_col.addWidget(self.transport)
         layout.addWidget(header)
@@ -639,6 +769,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._sync_ignore_region()
         self._sync_screen_view()
+        self._fit_transport()
 
     @Slot(str)
     def _on_hotkey(self, name: str) -> None:
@@ -685,6 +816,9 @@ class MainWindow(QMainWindow):
         self.refresh_transport()
         self._sync_cycles_controls()
         self._sync_speed_controls()
+        if hasattr(self, "filter_edit"):
+            self._apply_filter(self.filter_edit.text())
+        self._sync_status_metrics()
         if not self.worker:
             self.status.showMessage(self._idle_status())
 
@@ -694,17 +828,60 @@ class MainWindow(QMainWindow):
         self.setWindowModified(self.dirty)
         self.setWindowTitle(f"Motif — {self.script.name}[*]")
 
+    def estimated_cycle_ms(self) -> int:
+        """Rough wall time for one cycle: recorded pauses plus recorded travel."""
+        total = 0
+        for event in self.script.enabled_events():
+            total += max(0, event.delay_ms)
+            if event.travel_ms:
+                total += max(0, event.travel_ms)
+            elif event.points:
+                total += max(0, int(event.points[-1].get("t_ms") or 0))
+            if event.duration_ms:
+                total += max(0, event.duration_ms)
+        speed = max(0.05, float(self.script.humanize.speed))
+        return int(total / speed)
+
+    def _format_duration(self, ms: int) -> str:
+        if ms < 1000:
+            return f"{ms} ms"
+        if ms < 60_000:
+            return f"{ms / 1000:.1f} s"
+        return f"{ms // 60_000}m {int(ms % 60_000) // 1000}s"
+
+    def _sync_status_metrics(self) -> None:
+        """The run settings, pinned right, in tabular digits."""
+        if not hasattr(self, "status_metrics"):
+            return
+        count = len(self.script.enabled_events())
+        skipped = len(self.script.events) - count
+        origin = (
+            f"{self.script.origin_x},{self.script.origin_y}" if self.script.origin_set else "unset"
+        )
+        cycles = self.script.loop.count
+        cycle_text = "∞ cycles" if cycles == 0 else f"{cycles} cycle{'' if cycles == 1 else 's'}"
+        bits = [
+            f"{count} step{'' if count == 1 else 's'}",
+            f"{skipped} skipped" if skipped else "",
+            f"~{self._format_duration(self.estimated_cycle_ms())}/cycle" if count else "",
+            f"origin {origin}",
+            cycle_text,
+            f"{self.script.humanize.speed:g}× speed",
+            f"localhost:{DEFAULT_PORT}" if self.api.running else "",
+        ]
+        text = "  ·  ".join(bit for bit in bits if bit)
+        self.status_metrics.setText(text)
+        self.status_metrics.setAccessibleName(text.replace("·", ","))
+
     def _idle_status(self) -> str:
-        api = f"  ·  localhost:{DEFAULT_PORT}" if self.api.running else ""
         if not self.script.events:
             return (
-                f"No events yet  ·  Record (F9) or + Add  ·  F10 replay  ·  "
-                f"{exit_combo_label()} stop{api}"
+                f"No events yet  ·  Record (F9) or + Add  ·  "
+                f"{exit_combo_label()} always stops"
             )
-        origin = f"{self.script.origin_x}, {self.script.origin_y}" if self.script.origin_set else "not set"
         return (
-            f"{len(self.script.events)} events  ·  origin {origin}  ·  {self.script.humanize.preset}  ·  "
-            f"{self.script.humanize.speed:g}×  ·  cycles {self.script.loop.count or '∞'}{api}"
+            f"Ready  ·  F9 record  ·  F10 replay  ·  {exit_combo_label()} stop  ·  "
+            "Ctrl+? for shortcuts"
         )
 
     def _sync_selection(self) -> None:
@@ -798,12 +975,94 @@ class MainWindow(QMainWindow):
     def select_all_events(self) -> None:
         focus = QApplication.focusWidget()
         if isinstance(focus, (QWidget,)) and focus is not self.list:
-            from PySide6.QtWidgets import QLineEdit, QPlainTextEdit
+            from PySide6.QtWidgets import QPlainTextEdit
 
             if isinstance(focus, (QLineEdit, QPlainTextEdit)):
                 focus.selectAll()
                 return
         self.list.selectAll()
+
+    # --- Keyboard reach ------------------------------------------------------
+
+    def _apply_tab_order(self) -> None:
+        """Walk Tab through the window the way the eye reads it."""
+        chain = [
+            self.rec_btn,
+            self.replay_btn,
+            self.stop_btn,
+            *[self.cycle_buttons[v] for v in CYCLE_PRESETS],
+            self.cycles_spin,
+            *[self.speed_buttons[v] for v in SPEED_PRESETS],
+            self.speed_spin,
+            self.screen_view,
+            self.path_view,
+            self.add_btn,
+            self.filter_edit,
+            self.list,
+            self.inspector,
+        ]
+        for first, second in zip(chain, chain[1:]):
+            self.setTabOrder(first, second)
+
+    def focus_filter(self) -> None:
+        self.filter_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.filter_edit.selectAll()
+
+    def focus_events(self) -> None:
+        self.list.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        if self.list.currentItem() is None and self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _apply_filter(self, text: str = "") -> None:
+        shown = self.list.set_filter(text)
+        total = len(self.script.events)
+        if text.strip() and total:
+            self.filter_count.setText(f"{shown}/{total}")
+            self.filter_count.setAccessibleName(f"{shown} of {total} steps shown")
+        else:
+            self.filter_count.setText("")
+            self.filter_count.setAccessibleName("")
+
+    # --- Editing without the mouse -------------------------------------------
+
+    def move_event(self, delta: int) -> None:
+        """Alt+Up / Alt+Down — reorder without dragging."""
+        event = self.current_event()
+        if event is None or delta == 0:
+            return
+        events = self.script.events
+        index = events.index(event)
+        target = index + delta
+        if not 0 <= target < len(events):
+            return
+        self._push_undo()
+        events.insert(target, events.pop(index))
+        self.dirty = True
+        self.refresh(select_id=event.id)
+        self.status.showMessage(f"Moved “{event.display_name()}” to step {target + 1}")
+        announce(self.list, "moved")
+
+    def toggle_event_enabled(self) -> None:
+        """Space / Ctrl+E — skip a step without deleting it."""
+        ids = set(self.list.selected_ids())
+        if not ids:
+            event = self.current_event()
+            if event is None:
+                return
+            ids = {event.id}
+        chosen = [e for e in self.script.events if e.id in ids]
+        if not chosen:
+            return
+        self._push_undo()
+        enable = not all(e.enabled for e in chosen)
+        for event in chosen:
+            event.enabled = enable
+        self.dirty = True
+        self.refresh(select_id=next(iter(ids)))
+        word = "enabled" if enable else "skipped"
+        noun = "step" if len(chosen) == 1 else "steps"
+        self.status.showMessage(f"{len(chosen)} {noun} {word}")
+        announce(self.list, word)
 
     def zero_ground(self) -> None:
         event = self.current_event()
@@ -830,7 +1089,13 @@ class MainWindow(QMainWindow):
     def begin_pixel_pick(self) -> None:
         self.picking_pixel = True
         self._sync_ignore_region()
-        apply_banner(self.banner, "Click any screen pixel — Motif will capture its colour and position", "record")
+        apply_banner(
+            self.banner,
+            f"Click any screen pixel to sample its colour and position  ·  "
+            f"Esc or {exit_combo_label()} to cancel",
+            "record",
+        )
+        announce(self.banner, "Picking a pixel")
         self.grabMouse()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -964,17 +1229,22 @@ class MainWindow(QMainWindow):
         self.thread.start()
         apply_banner(self.banner, f"Replaying  ·  {exit_combo_label()} to stop", "ok")
         self.status.showMessage(f"Replaying  ·  {exit_combo_label()} stop")
+        announce(self.banner, "Replaying")
         self.refresh_transport()
 
     def _on_progress(self, cycle: int, index: int, name: str) -> None:
         total = self._play_total
         denom = "∞" if total <= 0 else str(total)
-        count = len(self.script.enabled_events())
+        events = self.script.enabled_events()
+        count = len(events)
         self.status.showMessage(
             f"Cycle {cycle} / {denom}  ·  {index + 1}/{count}  ·  {name}  ·  {exit_combo_label()} stop"
         )
         # Do not select rows during replay. setCurrentRow can raise Motif and
-        # macOS then swallows the last Control+Arrow space swipe.
+        # macOS then swallows the last Control+Arrow space swipe. Tinting the
+        # card is purely visual, so the running step is still easy to follow.
+        if 0 <= index < count:
+            self.list.mark_playing(events[index].id)
 
     def _on_play_done(self, result: str) -> None:
         thread = self.thread
@@ -982,6 +1252,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         # Last swipe already settled in the player. Do not activateWindow /
         # raise_ here — becoming key cancels a trailing Control+Arrow.
+        self.list.mark_playing("")
         apply_banner(self.banner)
         self.refresh_transport()
         labels = {"done": "Finished", "stopped": "Stopped", "failed": "Stopped — a wait timed out"}
@@ -990,6 +1261,7 @@ class MainWindow(QMainWindow):
         self.status.showMessage(
             f"{labels.get(result, result)}  ·  {count} {noun}  ·  Replay (F10) or Record (F9)"
         )
+        announce(self.status_metrics, labels.get(result, result))
         if thread is not None:
             thread.quit()
             thread.wait(1500)
@@ -1078,6 +1350,56 @@ class MainWindow(QMainWindow):
             self.stop_act.setEnabled(busy)
         if hasattr(self, "undo_act"):
             self.undo_act.setEnabled(bool(self._undo))
+        self._fit_transport()
+
+    def _transport_needed_width(self) -> int:
+        """Narrowest the transport row can be drawn without clipping.
+
+        Qt's own minimumSize accounts for the stretch and the fixed spacers, so
+        it is the honest number — a hand-rolled sum over-estimates and would
+        drop the chips while they still fit.
+        """
+        row = self.transport.layout()
+        return int(row.minimumSize().width())
+
+    def _fit_transport(self) -> None:
+        """Drop the preset chips before anything gets clipped.
+
+        Larger text must never cost the user a control. The chips are shortcuts
+        for the spin boxes beside them, so when the row runs out of room they are
+        the only thing that can go: Cycles and Speed stay editable either way.
+        """
+        available = self.width() - 2 * SPACE_LG
+        if available <= 0:
+            return
+        # Only the preset chips collapse. The number box stays because it lives
+        # inside the same cluster and is the control that can express any value.
+        droppable = (
+            self.cycle_chips,
+            self.cycles_divider,
+            self.speed_chips,
+            self.speed_divider,
+        )
+        # Measure with the chips shown, always. Measuring the collapsed row would
+        # report a width that fits, so the next resize would show them again and
+        # the one after that would hide them.
+        row = self.transport.layout()
+        for widget in droppable:
+            widget.setVisible(True)
+        row.invalidate()
+        row.activate()
+        crowded = self._transport_needed_width() > available
+        for widget in droppable:
+            widget.setVisible(not crowded)
+        if crowded:
+            row.invalidate()
+            row.activate()
+        hint = (
+            "Preset chips are hidden because the window is narrow for this text "
+            "size — use the number boxes, or widen Motif."
+        )
+        for spin in (self.cycles_spin, self.speed_spin):
+            spin.setToolTip(hint if crowded else spin.accessibleDescription())
 
     def _sync_transport(self) -> None:
         self.refresh_transport()
@@ -1213,6 +1535,114 @@ class MainWindow(QMainWindow):
         self.settings = save_settings({"show_screen_history": checked})
         self.screen_box.setVisible(checked)
 
+    # --- Appearance ----------------------------------------------------------
+
+    def apply_appearance(self, name: str, scale: float, *, persist: bool = True) -> None:
+        """Switch theme and text size live, and repaint everything that caches colour."""
+        palette = theme.resolve_theme(name)
+        size = theme.clamp_scale(scale)
+        qss = theme.set_theme(palette.name, size)
+        app = QApplication.instance()
+        if app is not None:
+            # Palette first: QSS does not reach scroll-area viewports or dialogs.
+            app.setPalette(theme.qt_palette(palette))
+            app.setStyleSheet(qss)
+        if persist:
+            self.settings = save_settings({"theme": palette.name, "text_scale": size})
+        # Re-lock chrome so fixed heights follow the new text size.
+        self._lock_chrome(self.rec_btn, BUTTON_MIN_WIDTH)
+        self._lock_chrome(self.replay_btn, BUTTON_MIN_WIDTH)
+        self._lock_chrome(self.stop_btn, STOP_MIN_WIDTH)
+        for btn in self.cycle_buttons.values():
+            self._lock_chrome(btn, CYCLE_MIN_WIDTH, CHIP_HEIGHT)
+        for btn in self.speed_buttons.values():
+            self._lock_chrome(btn, CHIP_MIN_WIDTH, CHIP_HEIGHT)
+        self.cycles_spin.setFixedHeight(theme.scaled(CHIP_HEIGHT))
+        self.speed_spin.setFixedHeight(theme.scaled(CHIP_HEIGHT))
+        self._sync_appearance_actions()
+        # EventCards cache their swatch colour in an inline stylesheet.
+        self.refresh()
+        self.screen_view.update()
+        self.path_view.update()
+        self.status.showMessage(
+            f"Appearance: {palette.label} · text {int(round(size * 100))}%"
+        )
+
+    def _sync_appearance_actions(self) -> None:
+        for name, act in getattr(self, "theme_acts", {}).items():
+            act.blockSignals(True)
+            act.setChecked(name == theme.active().name)
+            act.blockSignals(False)
+        for value, act in getattr(self, "scale_acts", {}).items():
+            act.blockSignals(True)
+            act.setChecked(abs(value - theme.active_scale()) < 1e-6)
+            act.blockSignals(False)
+
+    def cycle_theme(self) -> None:
+        names = list(theme.THEMES)
+        nxt = names[(names.index(theme.active().name) + 1) % len(names)]
+        self.apply_appearance(nxt, theme.active_scale())
+
+    def _set_theme(self, name: str) -> None:
+        self.apply_appearance(name, theme.active_scale())
+
+    def _set_text_scale(self, scale: float) -> None:
+        self.apply_appearance(theme.active().name, scale)
+
+    def show_shortcuts(self) -> None:
+        """Every shortcut in one place — discoverability, not folklore."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        col = QVBoxLayout(dialog)
+        col.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_MD)
+        col.setSpacing(SPACE_MD)
+        groups = (
+            (
+                "TRANSPORT",
+                (
+                    ("F9", "Start or stop recording"),
+                    ("F10", "Replay, or stop replaying"),
+                    (exit_combo_label(), "Stop — works even when Motif is not focused"),
+                    ("Esc", "Stop, when Motif is focused"),
+                ),
+            ),
+            (
+                "STEPS",
+                (
+                    ("↑ ↓", "Select the previous or next step"),
+                    ("Alt+↑ / Alt+↓", "Move the selected step"),
+                    ("Space", "Skip or restore the selected step"),
+                    ("Ctrl+D", "Duplicate the selected step"),
+                    ("Delete", "Remove the selected step"),
+                    ("Ctrl+F", "Filter steps"),
+                    ("Ctrl+L", "Jump to the step list"),
+                ),
+            ),
+            (
+                "FILE AND VIEW",
+                (
+                    ("Ctrl+N / Ctrl+O", "New motif / open a motif"),
+                    ("Ctrl+S / Ctrl+Shift+S", "Save / save as"),
+                    ("Ctrl+Z", "Undo"),
+                    ("Ctrl+Shift+T", "Next theme"),
+                    ("Ctrl+?", "This list"),
+                ),
+            ),
+        )
+        for title, rows in groups:
+            col.addWidget(section_header(title))
+            grid = QFormLayout()
+            grid.setHorizontalSpacing(SPACE_LG)
+            grid.setVerticalSpacing(SPACE_SM)
+            for keys, what in rows:
+                grid.addRow(kbd_label(keys), QLabel(what))
+            col.addLayout(grid)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        col.addWidget(buttons)
+        dialog.exec()
+
     def _set_loop_forever(self, checked: bool) -> None:
         self._set_cycle_count(0 if checked else 1)
 
@@ -1289,9 +1719,37 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Preferences")
         form = QFormLayout(dialog)
+
+        theme_box = QComboBox()
+        for palette in theme.THEMES.values():
+            theme_box.addItem(palette.label, palette.name)
+        theme_box.setCurrentIndex(max(0, theme_box.findData(theme.active().name)))
+        describe(theme_box, "Theme", "Colour scheme. High Contrast raises every ratio and thickens focus rings.")
+        scale_box = QComboBox()
+        for value in theme.TEXT_SCALES:
+            scale_box.addItem(
+                f"{theme.TEXT_SCALE_LABELS.get(value, '')} ({int(value * 100)}%)".strip(), value
+            )
+        scale_box.setCurrentIndex(max(0, scale_box.findData(theme.active_scale())))
+        describe(scale_box, "Text size", "Scales type and every control it sits in.")
+        form.addRow("Theme", theme_box)
+        form.addRow("Text size", scale_box)
+        # Live preview: the point of a text-size control is seeing the result.
+        theme_box.currentIndexChanged.connect(
+            lambda *_: self.apply_appearance(theme_box.currentData(), scale_box.currentData())
+        )
+        scale_box.currentIndexChanged.connect(
+            lambda *_: self.apply_appearance(theme_box.currentData(), scale_box.currentData())
+        )
+        form.addRow(hint_label("Appearance applies immediately and is remembered."))
+
         api_box = QCheckBox("Enable local control (localhost)")
         api_box.setChecked(self.api.running)
-        api_box.setToolTip("Off by default. Only needed for scripts that call Motif over HTTP.")
+        describe(
+            api_box,
+            "Enable local control",
+            "Off by default. Only needed for scripts that call Motif over HTTP.",
+        )
         form.addRow(api_box)
         form.addRow(
             hint_label(
@@ -1466,7 +1924,12 @@ def run_app() -> int:
     app.setOrganizationName("Motif")
     app.setStyle("Fusion")
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
-    app.setStyleSheet(QSS)
+    # Paint the saved theme before the first frame, so startup never flashes
+    # the default palette and then swap.
+    saved = load_settings()
+    qss = theme.set_theme(saved.get("theme", theme.DEFAULT_THEME), saved.get("text_scale", 1.0))
+    app.setPalette(theme.qt_palette())
+    app.setStyleSheet(qss)
     window = MainWindow()
     window.show()
     return app.exec()

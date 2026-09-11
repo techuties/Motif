@@ -18,6 +18,10 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "show_screen_history": True,
     "split_main": [900, 340],
     "split_left": [480, 120, 220],
+    # Appearance: theme name from motif.ui.theme.THEMES, and the accessibility
+    # text scale. Stored as strings/floats so an unknown value falls back safely.
+    "theme": "night",
+    "text_scale": 1.0,
 }
 
 

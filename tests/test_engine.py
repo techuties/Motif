@@ -1274,7 +1274,15 @@ def test_qt_plugin_env_uses_absolute_paths() -> None:
 
     import start
 
-    plugins = start.apply_qt_plugin_env(start.VENV)
+    # The cocoa default is a setdefault, so this has to start from a clean slate
+    # rather than inheriting whatever an earlier GUI test left behind.
+    previous = os.environ.pop("QT_QPA_PLATFORM", None)
+    try:
+        plugins = start.apply_qt_plugin_env(start.VENV)
+        chosen_platform = os.environ.get("QT_QPA_PLATFORM")
+    finally:
+        if previous is not None:
+            os.environ["QT_QPA_PLATFORM"] = previous
     assert plugins is not None
     assert plugins.is_absolute()
     assert plugins.is_dir()
@@ -1287,7 +1295,7 @@ def test_qt_plugin_env_uses_absolute_paths() -> None:
     assert platforms.is_dir()
     if sys.platform == "darwin":
         assert (platforms / "libqcocoa.dylib").exists()
-        assert os.environ.get("QT_QPA_PLATFORM") == "cocoa"
+        assert chosen_platform == "cocoa"
 
 
 def test_recorder_emits_without_appending() -> None:
@@ -1646,7 +1654,20 @@ def test_event_card_says_switch_app() -> None:
 def _offscreen_app():
     import os
 
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import start
+
+    # Qt cannot scan a plugin dir whose path contains spaces, and this project
+    # normally lives under iCloud ("Mobile Documents"). Point Qt at the
+    # space-free mirror here so a GUI test can run on its own, without relying
+    # on some earlier test having set the environment first.
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    plugins = start.pyside6_plugin_root(start.VENV)
+    if plugins is not None:
+        plugins = start.plugins_without_spaces(plugins)
+        os.environ["QT_PLUGIN_PATH"] = str(plugins)
+        if (plugins / "platforms").is_dir():
+            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(plugins / "platforms")
+
     from PySide6.QtWidgets import QApplication
 
     from motif.ui.theme import QSS
@@ -1687,17 +1708,30 @@ def test_transport_idle_with_events_shows_replay() -> None:
         assert win.stop_btn.parentWidget() is win.transport
         assert win.title.parentWidget() is win.title_bar
         assert win.title_bar is not win.transport
+        # Order matters; the spacers and hairline rules between zones do not.
         row = win.transport.layout()
-        assert row.itemAt(0).widget() is win.rec_btn
-        assert row.itemAt(1).widget() is win.replay_btn
-        assert row.itemAt(2).widget() is win.stop_btn
-        assert row.itemAt(3).widget() is win.exit_hint
-        assert row.itemAt(5).widget() is win.cycles_label
-        assert row.itemAt(6).widget() is win.cycles_cluster
-        assert row.itemAt(7).widget() is win.cycles_spin
-        assert row.itemAt(9).widget() is win.speed_label
-        assert row.itemAt(10).widget() is win.speed_cluster
-        assert row.itemAt(11).widget() is win.speed_spin
+        ordered = []
+        for i in range(row.count()):
+            widget = row.itemAt(i).widget()
+            if widget is None or widget.property("role") == "sep":
+                continue
+            ordered.append(widget)
+        assert ordered == [
+            win.rec_btn,
+            win.replay_btn,
+            win.stop_btn,
+            win.exit_hint,
+            win.cycles_label,
+            win.cycles_cluster,
+            win.speed_label,
+            win.speed_cluster,
+        ]
+        # Presets and the custom number box are one control, so the box lives
+        # inside the cluster rather than beside it.
+        assert win.cycles_spin.parentWidget() is win.cycles_cluster
+        assert win.speed_spin.parentWidget() is win.speed_cluster
+        assert win.cycle_chips.parentWidget() is win.cycles_cluster
+        assert win.speed_chips.parentWidget() is win.speed_cluster
         assert not win.replay_btn.isHidden()
         assert win.replay_btn.isEnabled()
         assert win.replay_btn.text() == "Replay"
@@ -1717,13 +1751,13 @@ def test_transport_idle_with_events_shows_replay() -> None:
         assert win.cycle_buttons[1].text() == "Once"
         assert win.cycle_buttons[10].text() == "10"
         assert win.cycle_buttons[100].text() == "100"
-        assert win.cycle_buttons[1].parentWidget() is win.cycles_cluster
+        assert win.cycle_buttons[1].parentWidget() is win.cycle_chips
         assert win.cycle_buttons[1].isChecked()
         assert not win.cycle_buttons[10].isChecked()
         assert win.cycles_spin.value() == 1
         assert list(win.speed_buttons) == list(SPEED_PRESETS)
         assert 1.0 in win.speed_buttons
-        assert win.speed_buttons[1.0].parentWidget() is win.speed_cluster
+        assert win.speed_buttons[1.0].parentWidget() is win.speed_chips
         assert win.speed_buttons[1.0].text() == "1.0×"
         assert not win.speed_buttons[1.0].isHidden()
         assert win.speed_buttons[1.0].isChecked()
@@ -2144,3 +2178,372 @@ def test_recorder_skips_exit_combo() -> None:
     rec._on_release(Key.ctrl)
     assert hotkeys == ["stop"]
     assert all(event.key != "esc" for event in received)
+
+
+# --- Design system, contrast, and accessibility -------------------------------
+
+
+def _luminance(hex_color: str) -> float:
+    raw = hex_color.lstrip("#")
+    channels = []
+    for i in (0, 2, 4):
+        c = int(raw[i : i + 2], 16) / 255.0
+        channels.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(fg: str, bg: str) -> float:
+    a, b = _luminance(fg), _luminance(bg)
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_every_theme_meets_wcag_aa() -> None:
+    """Text, muted text, disabled text and every event colour clear 4.5:1."""
+    from motif.ui import theme
+
+    for palette in theme.THEMES.values():
+        for ground in (palette.ground, palette.surface, palette.surface_2, palette.selection):
+            for role, color in (
+                ("text", palette.text),
+                ("muted", palette.muted),
+                ("faint", palette.faint),
+                ("accent_text", palette.accent_text),
+                ("mouse", palette.mouse),
+                ("key", palette.key),
+                ("wait", palette.wait),
+                ("trigger", palette.trigger),
+                ("origin", palette.origin),
+                ("note", palette.note),
+            ):
+                ratio = _contrast(color, ground)
+                assert ratio >= 4.5, f"{palette.name}: {role} on {ground} is {ratio:.2f}:1"
+        # Filled buttons carry their own ink, so check the pairs that ship together.
+        for ink, fill, label in (
+            (palette.accent_ink, palette.accent, "accent"),
+            (palette.record_ink, palette.record, "record"),
+            (palette.ok_ink, palette.ok, "playing"),
+        ):
+            ratio = _contrast(ink, fill)
+            assert ratio >= 4.5, f"{palette.name}: {label} ink is {ratio:.2f}:1"
+
+
+def test_body_text_reaches_aaa_on_every_ground() -> None:
+    from motif.ui import theme
+
+    for palette in theme.THEMES.values():
+        assert _contrast(palette.text, palette.ground) >= 7.0
+
+
+def test_theme_switch_rebuilds_palette_and_qss() -> None:
+    from motif.ui import theme
+
+    try:
+        assert theme.active().name == theme.DEFAULT_THEME
+        qss = theme.set_theme("day", 1.3)
+        assert theme.active().name == "day"
+        assert abs(theme.active_scale() - 1.3) < 1e-9
+        # The window ground follows the theme. (DARK.ground still appears in the
+        # light sheet as the ink on amber fills, so compare the ground rule.)
+        assert f"background: {theme.LIGHT.ground}" in qss
+        assert f"background: {theme.DARK.surface_2}" not in qss
+        # Event colours follow the theme; the light inks are not the dark ones.
+        assert theme.type_color_for(EventType.CLICK) == theme.LIGHT.mouse
+        assert theme.scaled(100) == 130
+    finally:
+        theme.set_theme(theme.DEFAULT_THEME, 1.0)
+    assert theme.type_color_for(EventType.CLICK) == theme.DARK.mouse
+
+
+def test_text_scale_is_clamped_and_never_shrinks() -> None:
+    from motif.ui import theme
+
+    assert theme.clamp_scale(0.2) == theme.MIN_SCALE
+    assert theme.clamp_scale(9.0) == theme.MAX_SCALE
+    assert theme.clamp_scale("nonsense") == 1.0
+    assert theme.MIN_SCALE >= 1.0
+
+
+def test_unknown_theme_falls_back_to_default() -> None:
+    from motif.ui import theme
+
+    assert theme.resolve_theme("no-such-theme").name == theme.DEFAULT_THEME
+    assert theme.resolve_theme("").name == theme.DEFAULT_THEME
+
+
+def test_transport_is_keyboard_reachable() -> None:
+    """Regression: the transport used to be NoFocus, so Tab skipped every verb."""
+    from PySide6.QtCore import Qt
+
+    from motif.ui.main_window import MainWindow
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        controls = [
+            win.rec_btn,
+            win.replay_btn,
+            win.stop_btn,
+            win.cycles_spin,
+            win.speed_spin,
+            win.list,
+            win.filter_edit,
+            win.path_view,
+            win.screen_view,
+            *win.cycle_buttons.values(),
+            *win.speed_buttons.values(),
+        ]
+        for widget in controls:
+            assert widget.focusPolicy() == Qt.FocusPolicy.StrongFocus, widget.objectName()
+    finally:
+        _close_window(win)
+        _ = app
+
+
+def test_controls_expose_accessible_names() -> None:
+    from motif.ui.main_window import MainWindow
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        for widget in (
+            win.rec_btn,
+            win.replay_btn,
+            win.stop_btn,
+            win.cycles_spin,
+            win.speed_spin,
+            win.filter_edit,
+            win.list,
+            win.path_view,
+            win.screen_view,
+            win.add_btn,
+            win.inspector.name_edit,
+            win.inspector.delay,
+            win.inspector.x_box,
+            win.inspector.play_mode,
+        ):
+            assert widget.accessibleName().strip(), widget.objectName()
+    finally:
+        _close_window(win)
+        _ = app
+
+
+def test_event_rows_carry_spoken_text() -> None:
+    from PySide6.QtCore import Qt
+
+    from motif.ui.main_window import MainWindow
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        win.script.events = [
+            Event(type=EventType.CLICK.value, x=3, y=4, delay_ms=120),
+            Event(type=EventType.KEY_DOWN.value, key="enter", delay_ms=80, enabled=False),
+        ]
+        win.refresh()
+        first = win.list.item(0).data(Qt.ItemDataRole.AccessibleTextRole)
+        second = win.list.item(1).data(Qt.ItemDataRole.AccessibleTextRole)
+        assert "1 of 2" in first
+        assert "Click" in first
+        assert "120 milliseconds before" in first
+        # Disabled state must be spoken, not only dimmed.
+        assert "skipped" in second
+    finally:
+        _close_window(win)
+        _ = app
+
+
+def test_filter_hides_rows_without_dropping_events() -> None:
+    """Reorder must stay safe while a filter is on, so rows are hidden not removed."""
+    from motif.ui.main_window import MainWindow
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        win.script.events = [
+            Event(type=EventType.CLICK.value, x=1, y=1, name="Open menu"),
+            Event(type=EventType.KEY_DOWN.value, key="enter", name="Confirm"),
+            Event(type=EventType.WAIT.value, delay_ms=200, name="Breathe"),
+        ]
+        win.refresh()
+        before = win.list.ordered_ids()
+        win.filter_edit.setText("confirm")
+        assert win.list.count() == 3
+        assert win.list.ordered_ids() == before
+        assert win.list.item(0).isHidden()
+        assert not win.list.item(1).isHidden()
+        assert win.filter_count.text() == "1/3"
+        win.filter_edit.setText("")
+        assert not any(win.list.item(i).isHidden() for i in range(3))
+        assert win.filter_count.text() == ""
+    finally:
+        _close_window(win)
+        _ = app
+
+
+def test_move_and_toggle_event_from_keyboard() -> None:
+    from motif.ui.main_window import MainWindow
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        first = Event(type=EventType.CLICK.value, x=1, y=1, name="One")
+        second = Event(type=EventType.WAIT.value, delay_ms=50, name="Two")
+        win.script.events = [first, second]
+        win.refresh(select_id=first.id)
+        win.move_event(1)
+        assert [e.name for e in win.script.events] == ["Two", "One"]
+        win.move_event(-1)
+        assert [e.name for e in win.script.events] == ["One", "Two"]
+        # Off the end is a no-op, not an exception or a wrap.
+        win.refresh(select_id=first.id)
+        win.move_event(-1)
+        assert [e.name for e in win.script.events] == ["One", "Two"]
+        win.toggle_event_enabled()
+        assert not first.enabled
+        win.toggle_event_enabled()
+        assert first.enabled
+    finally:
+        _close_window(win)
+        _ = app
+
+
+def test_canvas_arrow_keys_step_through_events() -> None:
+    from motif.ui.widgets import step_selection
+
+    script = Script()
+    a = Event(type=EventType.CLICK.value, x=1, y=1)
+    b = Event(type=EventType.MOVE.value, x=2, y=2)
+    note = Event(type=EventType.COMMENT.value)
+    script.events = [a, note, b]
+    assert step_selection(script, "", 1) == a.id
+    assert step_selection(script, a.id, 1) == b.id
+    # Wraps, and skips the note because it has no position.
+    assert step_selection(script, b.id, 1) == a.id
+    assert step_selection(script, a.id, -1) == b.id
+    assert step_selection(Script(), "", 1) == ""
+
+
+def test_playing_row_is_marked_without_selecting_it() -> None:
+    """Selection raises Motif and eats a trailing space swipe; tint instead."""
+    from motif.ui.main_window import MainWindow
+    from motif.ui.widgets import EventCard
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        win.script.events = [
+            Event(type=EventType.CLICK.value, x=1, y=1),
+            Event(type=EventType.WAIT.value, delay_ms=10),
+        ]
+        win.refresh()
+        win.list.setCurrentRow(0)
+        win._play_total = 1
+        win._on_progress(1, 1, "Wait")
+        cards = [win.list.itemWidget(win.list.item(i)) for i in range(2)]
+        assert all(isinstance(c, EventCard) for c in cards)
+        assert not cards[0].playing
+        assert cards[1].playing
+        assert win.list.currentRow() == 0
+        win.list.mark_playing("")
+        assert not any(c.playing for c in cards)
+    finally:
+        _close_window(win)
+        _ = app
+
+
+def test_status_metrics_summarise_the_run() -> None:
+    from motif.ui.main_window import MainWindow
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        win.script.events = [
+            Event(type=EventType.CLICK.value, x=1, y=1, delay_ms=500),
+            Event(type=EventType.WAIT.value, delay_ms=500, enabled=False),
+        ]
+        win.script.loop.count = 3
+        win.refresh()
+        text = win.status_metrics.text()
+        assert "1 step" in text
+        assert "1 skipped" in text
+        assert "3 cycles" in text
+        assert "1× speed" in text
+        assert win.estimated_cycle_ms() == 500
+        # Speed is wall-clock, so 2× halves the estimate.
+        win.script.humanize.speed = 2.0
+        assert win.estimated_cycle_ms() == 250
+    finally:
+        _close_window(win)
+        _ = app
+
+
+def test_appearance_settings_round_trip(tmp_path, monkeypatch) -> None:
+    import motif.storage as storage
+    from motif.ui import theme
+
+    monkeypatch.setattr(storage, "config_dir", lambda: tmp_path)
+    defaults = storage.load_settings()
+    assert defaults["theme"] == theme.DEFAULT_THEME
+    assert defaults["text_scale"] == 1.0
+    storage.save_settings({"theme": "contrast", "text_scale": 1.3})
+    saved = storage.load_settings()
+    assert saved["theme"] == "contrast"
+    assert saved["text_scale"] == 1.3
+
+
+def test_event_filter_matches_more_than_the_name() -> None:
+    from motif.ui.widgets import event_matches_filter
+
+    swipe = Event(type=EventType.SWIPE.value, app="Safari", bundle_id="com.apple.Safari")
+    assert event_matches_filter(swipe, "")
+    assert event_matches_filter(swipe, "safari")
+    assert event_matches_filter(swipe, "switch app")
+    assert not event_matches_filter(swipe, "mail")
+    key = Event(type=EventType.KEY_DOWN.value, key="enter")
+    assert event_matches_filter(key, "enter")
+
+
+def test_large_text_drops_chips_but_never_a_control() -> None:
+    """Bigger text must not clip the transport, and must not cost a setting."""
+    from motif.ui import theme
+    from motif.ui.main_window import MainWindow
+
+    app = _offscreen_app()
+    win = MainWindow()
+    try:
+        win.resize(1360, 880)
+        win.refresh_transport()
+        assert not win.cycle_chips.isHidden()
+        assert not win.speed_chips.isHidden()
+
+        win.apply_appearance("night", 1.3, persist=False)
+        win.resize(1360, 880)
+        win.refresh_transport()
+        assert win.cycle_chips.isHidden()
+        assert win.speed_chips.isHidden()
+        # Only the presets collapse. The clusters and their number boxes stay,
+        # and the number box can express any value a chip could.
+        assert not win.cycles_cluster.isHidden()
+        assert not win.speed_cluster.isHidden()
+        assert not win.cycles_spin.isHidden()
+        assert not win.speed_spin.isHidden()
+        assert win.cycles_spin.isEnabled()
+        assert win.speed_spin.isEnabled()
+
+        # Repeated fits settle instead of flip-flopping.
+        states = []
+        for _ in range(4):
+            win._fit_transport()
+            states.append(win.cycle_chips.isHidden())
+        assert states == [True, True, True, True]
+
+        # Widen and the chips come back.
+        win.resize(1900, 880)
+        win._fit_transport()
+        assert not win.cycle_chips.isHidden()
+    finally:
+        win.apply_appearance(theme.DEFAULT_THEME, 1.0, persist=False)
+        _close_window(win)
+        _ = app
