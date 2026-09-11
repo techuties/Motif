@@ -32,6 +32,20 @@ Transport strip:
 Day and High Contrast stills: [`motif-day.png`](docs/media/motif-day.png) · [`motif-high-contrast.png`](docs/media/motif-high-contrast.png)
 
 
+
+## Tour the window
+
+Plain-English map of the main Motif window:
+
+![Motif GUI tour — numbered callouts](docs/media/motif-gui-tour.png)
+
+1. **Transport** — Record, Replay, Stop. **Cycles** = how many times to play; **Speed** = how fast. Hotkeys: F9 / F10 / ⌃⌥Esc.
+2. **Screen History** — Monitors Motif detected (size + where clicks landed). If you plug in a different display layout later, Motif warns from the **display fingerprint** stored with the motif.
+3. **Path** — The mouse trail relative to **zero-ground** (the `+` origin). Replay follows this path either at the **recorded origin** or shifted to wherever the cursor is now.
+4. **Events** — The step list (moves, clicks, keys, waits, notes). Filter, add, skip, reorder; select a step to edit it.
+5. **Inspector / Replay** — Details for the selected step, plus replay mode, gap between cycles, return-to-origin, preserve micro-jitter, and optional **window-relative** (smart-rec) coords.
+6. **Status bar** — Ready/recording/playing, shortcuts, step count, timing, origin. Display-layout warnings show up here too.
+
 ## What Motif can do
 
 TinyTask-style **record → edit → replay** for mouse and keyboard — not a full Keyboard Maestro replacement.
