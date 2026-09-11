@@ -32,7 +32,7 @@ Day and High Contrast stills: [`motif-day.png`](docs/media/motif-day.png) · [`m
 python3 start.py
 ```
 
-`start.cmd` and a Linux launcher exist. **macOS and Linux are both smoke-tested** (GUI + pytest). macOS remains the primary target for Accessibility, Spaces, and `Motif.app` packaging.
+`start.cmd` (Windows) and a Linux launcher exist. **macOS and Linux are GUI + pytest smoke-tested**; Windows runs the same Python core via `start.cmd`. macOS remains primary for Accessibility, Spaces, and `Motif.app` packaging.
 
 Requires **Python 3.11+**. The first run creates `.venv`, installs Motif, and opens the window. After that, the same command just starts. A terminal start on Mac still attributes Accessibility to Terminal/Python — use `Motif.app` for recording.
 
