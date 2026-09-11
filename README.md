@@ -35,7 +35,7 @@ Day and High Contrast stills: [`motif-day.png`](docs/media/motif-day.png) · [`m
 
 ## Tour the window
 
-Plain-English map of the main Motif window:
+Plain-English map of the main Motif window (callouts aligned to the real panels):
 
 ![Motif GUI tour — numbered callouts](docs/media/motif-gui-tour.png)
 
