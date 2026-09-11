@@ -19,7 +19,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QCursor, QFontDatabase, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QCloseEvent, QCursor, QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -44,12 +45,22 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
 
 from motif.api import DEFAULT_PORT, MotifAPI
 from motif.example import example_script
+from motif.schedule import (
+    ScheduleEntry,
+    arm_delay,
+    due_entries,
+    mark_fired,
+    schedules_from_settings,
+    schedules_to_settings,
+)
+from motif.window_rel import capture_window_metadata, platform_window_support
 from motif.keys import (
     GlobalHotkeys,
     exit_combo_label,
@@ -182,7 +193,17 @@ class MainWindow(QMainWindow):
         self._hotkey_until = 0.0
         self._cycles_custom = False
         self._play_total = 1
-        self._hotkeys = GlobalHotkeys(self.hotkey_pressed.emit)
+        self._settings = load_settings()
+        extras = {}
+        for row in self._settings.get("motif_hotkeys") or []:
+            if isinstance(row, dict) and row.get("hotkey") and row.get("path"):
+                extras[str(row["hotkey"])] = f"play_file:{row['path']}"
+        self._hotkeys = GlobalHotkeys(self.hotkey_pressed.emit, extras)
+        self._tray: QSystemTrayIcon | None = None
+        self._schedules = schedules_from_settings(self._settings)
+        self._schedule_timer = QTimer(self)
+        self._schedule_timer.setInterval(15_000)
+        self._schedule_timer.timeout.connect(self._poll_schedules)
         self.api = MotifAPI(handlers=self._api_handlers())
         self.ui_call.connect(self._run_ui, Qt.ConnectionType.QueuedConnection)
         self.event_captured.connect(self._append_recorded, Qt.ConnectionType.QueuedConnection)
@@ -709,6 +730,8 @@ class MainWindow(QMainWindow):
                 f"{start}  ·  F10 replay  ·  {exit_combo_label()} stop{extra}"
             )
         self._hotkeys.start()
+        self._setup_tray()
+        self._schedule_timer.start()
         self._sync_ignore_region()
         self._sync_transport()
 
@@ -791,6 +814,10 @@ class MainWindow(QMainWindow):
             self.toggle_record()
         elif name == "play":
             self.toggle_play()
+        elif name.startswith("play_file:"):
+            path = name.split(":", 1)[1].strip()
+            if path:
+                self._play_motif_file(Path(path))
 
     @Slot(object)
     def _append_recorded(self, event: Event) -> None:
@@ -1808,7 +1835,105 @@ class MainWindow(QMainWindow):
             "Record, edit, and replay mouse and keyboard.",
         )
 
+
+    def _setup_tray(self) -> None:
+        if not bool(self._settings.get("tray_enabled", True)):
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if self._tray is not None:
+            return
+        icon = self.windowIcon()
+        if icon.isNull():
+            icon = QIcon.fromTheme("input-mouse")
+        tray = QSystemTrayIcon(icon, self)
+        menu = QMenu()
+        act_show = QAction("Show", self)
+        act_show.triggered.connect(self._tray_show)
+        act_rec = QAction("Record", self)
+        act_rec.triggered.connect(self.toggle_record)
+        act_play = QAction("Replay last", self)
+        act_play.triggered.connect(self._tray_replay_last)
+        act_quit = QAction("Quit", self)
+        act_quit.triggered.connect(QApplication.instance().quit)
+        menu.addAction(act_show)
+        menu.addAction(act_rec)
+        menu.addAction(act_play)
+        menu.addSeparator()
+        menu.addAction(act_quit)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._tray_activated)
+        tray.setToolTip("Motif")
+        tray.show()
+        self._tray = tray
+
+    def _tray_show(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _tray_activated(self, reason) -> None:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._tray_show()
+
+    def _tray_replay_last(self) -> None:
+        last = (self._settings.get("last_motif_path") or "").strip()
+        if self.path is not None:
+            self.toggle_play()
+            return
+        if last and Path(last).is_file():
+            self._play_motif_file(Path(last))
+        else:
+            self.toggle_play()
+
+    def _play_motif_file(self, path: Path) -> None:
+        try:
+            loaded = load_script(path)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.status.showMessage(f"Hotkey motif failed: {exc}")
+            return
+        self.script = loaded
+        self.recorder.script = self.script
+        self.path = path
+        self.dirty = False
+        self._remember_last_path(path)
+        self.refresh()
+        if not self.player.busy and not self.recorder.recording:
+            self.toggle_play()
+
+    def _remember_last_path(self, path: Path | None) -> None:
+        if path is None:
+            return
+        self._settings = save_settings({"last_motif_path": str(path)})
+
+    def _poll_schedules(self) -> None:
+        if self.player.busy or self.recorder.recording:
+            return
+        due = due_entries(self._schedules)
+        if not due:
+            return
+        for entry in due:
+            path = Path(entry.path)
+            mark_fired(entry)
+            if path.is_file():
+                self._play_motif_file(path)
+                break
+        self._persist_schedules()
+
+    def _persist_schedules(self) -> None:
+        self._settings = save_settings({"schedules": schedules_to_settings(self._schedules)})
+
+    def _persist_hotkeys(self, rows: list[dict]) -> None:
+        self._settings = save_settings({"motif_hotkeys": rows})
+        extras = {}
+        for row in rows:
+            if row.get("hotkey") and row.get("path"):
+                extras[str(row["hotkey"])] = f"play_file:{row['path']}"
+        self._hotkeys.set_extra(extras)
+
     def show_preferences(self) -> None:
+        from motif.ui.widgets import describe, hint_label
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Preferences")
         form = QFormLayout(dialog)
@@ -1827,7 +1952,6 @@ class MainWindow(QMainWindow):
         describe(scale_box, "Text size", "Scales type and every control it sits in.")
         form.addRow("Theme", theme_box)
         form.addRow("Text size", scale_box)
-        # Live preview: the point of a text-size control is seeing the result.
         theme_box.currentIndexChanged.connect(
             lambda *_: self.apply_appearance(theme_box.currentData(), scale_box.currentData())
         )
@@ -1844,12 +1968,97 @@ class MainWindow(QMainWindow):
             "Off by default. Only needed for scripts that call Motif over HTTP.",
         )
         form.addRow(api_box)
-        form.addRow(
-            hint_label(
-                "Local control is not required for recording or replay. "
-                "Turn it on only if another program on this machine should drive Motif."
+
+        tray_box = QCheckBox("Show menu-bar / system tray icon")
+        tray_box.setChecked(bool(self._settings.get("tray_enabled", True)))
+        describe(tray_box, "Tray", "Show, Record, Replay last, Quit when Motif is in the background.")
+        form.addRow(tray_box)
+
+        win_box = QCheckBox("Default new motifs to window-relative")
+        win_box.setChecked(bool(self._settings.get("window_relative_default", False)))
+        describe(win_box, "Window-relative default", platform_window_support())
+        form.addRow(win_box)
+        form.addRow(hint_label(platform_window_support()))
+
+        form.addRow(hint_label("Motif hotkey library — bind saved .motif.json files beyond F9/F10:"))
+        hotkey_list = QListWidget()
+        rows = [dict(r) for r in (self._settings.get("motif_hotkeys") or []) if isinstance(r, dict)]
+        for row in rows:
+            hotkey_list.addItem(f"{row.get('hotkey', '?')} → {row.get('path', '')}")
+        form.addRow(hotkey_list)
+        hk_row = QHBoxLayout()
+        hk_edit = QLineEdit()
+        hk_edit.setPlaceholderText("f6 or ctrl+shift+f6")
+        hk_path = QLineEdit()
+        hk_path.setPlaceholderText("Path to .motif.json")
+        hk_browse = QPushButton("…")
+        def _browse():
+            filename, _ = QFileDialog.getOpenFileName(dialog, "Motif file", "", f"Motif (*{EXTENSION})")
+            if filename:
+                hk_path.setText(filename)
+        hk_browse.clicked.connect(_browse)
+        hk_add = QPushButton("Add")
+        def _add_hk():
+            hotkey = hk_edit.text().strip()
+            path = hk_path.text().strip()
+            if not hotkey or not path:
+                return
+            rows.append({"hotkey": hotkey, "path": path})
+            hotkey_list.addItem(f"{hotkey} → {path}")
+            hk_edit.clear()
+            hk_path.clear()
+        hk_add.clicked.connect(_add_hk)
+        hk_del = QPushButton("Remove")
+        def _del_hk():
+            i = hotkey_list.currentRow()
+            if 0 <= i < len(rows):
+                rows.pop(i)
+                hotkey_list.takeItem(i)
+        hk_del.clicked.connect(_del_hk)
+        hk_row.addWidget(hk_edit)
+        hk_row.addWidget(hk_path)
+        hk_row.addWidget(hk_browse)
+        hk_row.addWidget(hk_add)
+        hk_row.addWidget(hk_del)
+        form.addRow(hk_row)
+
+        form.addRow(hint_label("Scheduler (Motif must stay running):"))
+        sched_list = QListWidget()
+        for entry in self._schedules:
+            label = (
+                f"{'daily ' + entry.time_local if entry.kind == 'daily' else 'delay ' + str(entry.delay_minutes) + 'm'}"
+                f" → {entry.path}{' (on)' if entry.enabled else ' (off)'}"
             )
-        )
+            sched_list.addItem(label)
+        form.addRow(sched_list)
+        sch_path = QLineEdit(str(self.path) if self.path else "")
+        sch_path.setPlaceholderText("Motif path")
+        sch_time = QLineEdit("09:00")
+        sch_time.setPlaceholderText("HH:MM daily")
+        sch_delay = QSpinBox()
+        sch_delay.setRange(0, 24 * 60)
+        sch_delay.setValue(30)
+        sch_delay.setSuffix(" min delay")
+        sch_btns = QHBoxLayout()
+        add_daily = QPushButton("Add daily")
+        add_delay = QPushButton("Add delay")
+        def _add_daily():
+            entry = ScheduleEntry(path=sch_path.text().strip(), kind="daily", time_local=sch_time.text().strip() or "09:00")
+            self._schedules.append(entry)
+            sched_list.addItem(f"daily {entry.time_local} → {entry.path} (on)")
+        def _add_delay():
+            entry = arm_delay(ScheduleEntry(path=sch_path.text().strip()), minutes=sch_delay.value())
+            self._schedules.append(entry)
+            sched_list.addItem(f"delay {entry.delay_minutes}m → {entry.path} (on)")
+        add_daily.clicked.connect(_add_daily)
+        add_delay.clicked.connect(_add_delay)
+        sch_btns.addWidget(add_daily)
+        sch_btns.addWidget(add_delay)
+        form.addRow("Motif", sch_path)
+        form.addRow("Daily time", sch_time)
+        form.addRow(sch_delay)
+        form.addRow(sch_btns)
+
         if sys.platform == "darwin":
             perm = QPushButton("Permissions…")
             perm.clicked.connect(self.show_permissions)
@@ -1863,6 +2072,20 @@ class MainWindow(QMainWindow):
         form.addRow(buttons)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._set_api_enabled(api_box.isChecked())
+            self._settings = save_settings(
+                {
+                    "tray_enabled": tray_box.isChecked(),
+                    "window_relative_default": win_box.isChecked(),
+                    "motif_hotkeys": rows,
+                    "schedules": schedules_to_settings(self._schedules),
+                }
+            )
+            self._persist_hotkeys(rows)
+            if tray_box.isChecked():
+                self._setup_tray()
+            elif self._tray is not None:
+                self._tray.hide()
+                self._tray = None
 
     def install_to_applications(self) -> None:
         if sys.platform != "darwin":
@@ -1905,6 +2128,9 @@ class MainWindow(QMainWindow):
             return
         self._undo.clear()
         self.script = Script()
+        if bool(self._settings.get("window_relative_default")):
+            self.script.window_relative = True
+            capture_window_metadata(self.script)
         self.recorder.script = self.script
         self.path = None
         self.dirty = False
@@ -1946,6 +2172,7 @@ class MainWindow(QMainWindow):
             self.save_script_as()
             return
         save_script(self.script, self.path)
+        self._remember_last_path(self.path)
         self.dirty = False
         self.refresh()
 
@@ -1954,6 +2181,7 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         self.path = save_script(self.script, filename)
+        self._remember_last_path(self.path)
         self.dirty = False
         self.refresh()
 
@@ -1986,7 +2214,10 @@ class MainWindow(QMainWindow):
             return
         self._persist_splitters()
         self.stop_all()
+        self._schedule_timer.stop()
         self._hotkeys.stop()
+        if self._tray is not None:
+            self._tray.hide()
         self.api.stop()
         event.accept()
 

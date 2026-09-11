@@ -986,6 +986,22 @@ class Inspector(QWidget):
         self.template_edit = QLineEdit()
         self.template_edit.setPlaceholderText("Path to template image…")
         describe(self.template_edit, "Template image", "PNG/JPEG Motif waits to appear on screen.")
+        self.click_on_find = QCheckBox("Click when found")
+        describe(self.click_on_find, "Click when found", "Move and click at the match using the anchor below.")
+        self.click_anchor = QComboBox()
+        self.click_anchor.addItems(["center", "tl", "tr", "bl", "br"])
+        describe(self.click_anchor, "Click anchor", "Which corner/center of the match to click.")
+        self.on_found = QComboBox()
+        self.on_found.setEditable(True)
+        self.on_found.addItems(["continue", "stop", "goto:label"])
+        describe(self.on_found, "On found", "continue, stop, or goto:your_label after a match.")
+        self.on_miss = QComboBox()
+        self.on_miss.setEditable(True)
+        self.on_miss.addItems(["stop", "continue", "goto:label"])
+        describe(self.on_miss, "On miss", "What to do if the image/colour wait times out.")
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("Branch label (optional)")
+        describe(self.label_edit, "Label", "Target name for goto:label from another wait.")
         # "Swatch" named the decoration, not the action.
         self.pick_color = QPushButton("Colour…")
         apply_button_kind(self.pick_color, "ghost")
@@ -1054,6 +1070,11 @@ class Inspector(QWidget):
         pixel_form.addRow("Colour", self.color_wrap)
         pixel_form.addRow("Template", self.template_edit)
         pixel_form.addRow("Tolerance", self.tolerance)
+        pixel_form.addRow(self.click_on_find)
+        pixel_form.addRow("Anchor", self.click_anchor)
+        pixel_form.addRow("On found", self.on_found)
+        pixel_form.addRow("On miss", self.on_miss)
+        pixel_form.addRow("Label", self.label_edit)
         pixel_form.addRow(self.match_label, self.match)
         pixel_form.addRow("Timeout", self.timeout)
 
@@ -1116,12 +1137,23 @@ class Inspector(QWidget):
         self.park = QCheckBox("Park at origin before each cycle")
         self.preserve_jitter = QCheckBox("Preserve micro-jitter while recording")
         describe(self.preserve_jitter, "Preserve micro-jitter", "Keep tiny mouse tremors instead of deduping sub-3px samples.")
+        self.window_relative = QCheckBox("Window-relative coords (smart-rec)")
+        describe(
+            self.window_relative,
+            "Window-relative",
+            "Store/replay relative to a target window. macOS preferred; other OS degrade.",
+        )
+        self.window_pattern = QLineEdit()
+        self.window_pattern.setPlaceholderText("Window title pattern (optional)")
+        describe(self.window_pattern, "Window title", "Regex or substring for the target window.")
         loop_form.addRow("Mode", self.play_mode)
         loop_form.addRow("Cycles", self.loops)
         loop_form.addRow("Gap", self.gap)
         loop_form.addRow(self.return_origin)
         loop_form.addRow(self.park)
         loop_form.addRow(self.preserve_jitter)
+        loop_form.addRow(self.window_relative)
+        loop_form.addRow("Window", self.window_pattern)
         loop_form.addRow(
             hint_label(
                 "Recorded origin uses the same global coordinates as capture — clicks stay on that display even if Motif moves. "
@@ -1133,6 +1165,27 @@ class Inspector(QWidget):
         self.feel_box, feel_form = section_box("FEEL")
         self.preset = QComboBox()
         self.preset.addItems([p.value for p in HumanizePreset])
+        self.preset.setToolTip(
+            "precise — recorded path, no delay/path jitter.\n"
+            "natural — bezier paths, light timing & click jitter.\n"
+            "cautious — overshoot paths, slower travel, stronger jitter.\n"
+            "custom — edit Default path yourself."
+        )
+        self.preset.setItemData(
+            0,
+            "Precise: walk the recorded stroke with no humanize jitter.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self.preset.setItemData(
+            1,
+            "Natural: bezier travel, light path/delay/click jitter.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self.preset.setItemData(
+            2,
+            "Cautious: overshoot paths, slower Fitts travel, stronger jitter.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
         self.speed = QDoubleSpinBox()
         self.speed.setRange(0.25, 4.0)
         self.speed.setSingleStep(0.25)
@@ -1186,6 +1239,12 @@ class Inspector(QWidget):
             self.pressed,
             self.key,
             self.color,
+            self.template_edit,
+            self.click_on_find,
+            self.click_anchor,
+            self.on_found,
+            self.on_miss,
+            self.label_edit,
             self.tolerance,
             self.match,
             self.timeout,
@@ -1198,6 +1257,8 @@ class Inspector(QWidget):
             self.return_origin,
             self.park,
             self.preserve_jitter,
+            self.window_relative,
+            self.window_pattern,
             self.preset,
             self.speed,
             self.human_path,
@@ -1302,6 +1363,8 @@ class Inspector(QWidget):
         self.return_origin.setChecked(script.loop.return_to_origin)
         self.park.setChecked(script.loop.park_before_cycle)
         self.preserve_jitter.setChecked(bool(script.preserve_micro_jitter))
+        self.window_relative.setChecked(bool(script.window_relative))
+        self.window_pattern.setText(script.window_title_pattern or script.window_title or "")
         self.preset.setCurrentText(script.humanize.preset)
         self.speed.setValue(float(script.humanize.speed))
         self.human_path.setCurrentText(script.humanize.path)
@@ -1324,7 +1387,19 @@ class Inspector(QWidget):
         self.key.setText(event.key)
         self.color.setText(event.color)
         self.template_edit.setText(event.template)
-        self.template_edit.setVisible(event.type_enum() == EventType.WAIT_IMAGE)
+        is_img = event.type_enum() == EventType.WAIT_IMAGE
+        is_wait_branch = event.type_enum() in {EventType.WAIT_IMAGE, EventType.WAIT_PIXEL}
+        self.template_edit.setVisible(is_img)
+        self.click_on_find.setChecked(bool(event.click_on_find))
+        self.click_on_find.setVisible(is_wait_branch)
+        idx = self.click_anchor.findText(event.click_anchor or "center")
+        self.click_anchor.setCurrentIndex(max(0, idx))
+        self.click_anchor.setVisible(is_wait_branch)
+        self.on_found.setCurrentText(event.on_found or "continue")
+        self.on_found.setVisible(is_wait_branch)
+        self.on_miss.setCurrentText(event.on_miss or "stop")
+        self.on_miss.setVisible(is_wait_branch)
+        self.label_edit.setText(event.label or "")
         self.tolerance.setValue(event.tolerance)
         self.match.setCurrentText(event.match)
         self.timeout.setValue(event.timeout_ms)
@@ -1369,6 +1444,12 @@ class Inspector(QWidget):
             if self.active.type_enum() == EventType.WAIT_IMAGE:
                 self.active.template = self.template_edit.text().strip()
                 self.active.threshold = max(0.05, min(1.0, self.tolerance.value() / 100.0))
+            if self.active.type_enum() in {EventType.WAIT_IMAGE, EventType.WAIT_PIXEL}:
+                self.active.click_on_find = self.click_on_find.isChecked()
+                self.active.click_anchor = self.click_anchor.currentText() or "center"
+                self.active.on_found = self.on_found.currentText().strip() or "continue"
+                self.active.on_miss = self.on_miss.currentText().strip() or "stop"
+            self.active.label = self.label_edit.text().strip()
             self.active.tolerance = self.tolerance.value()
             self.active.match = self.match.currentText()
             self.active.timeout_ms = self.timeout.value()
@@ -1381,6 +1462,11 @@ class Inspector(QWidget):
         self.script.loop.return_to_origin = self.return_origin.isChecked()
         self.script.loop.park_before_cycle = self.park.isChecked()
         self.script.preserve_micro_jitter = self.preserve_jitter.isChecked()
+        self.script.window_relative = self.window_relative.isChecked()
+        pattern = self.window_pattern.text().strip()
+        self.script.window_title_pattern = pattern
+        if pattern and not self.script.window_title:
+            self.script.window_title = pattern
         preset = self.preset.currentText()
         self.script.humanize.speed = float(self.speed.value())
         if preset != self.script.humanize.preset:
@@ -1440,6 +1526,10 @@ def add_event_of_type(kind: EventType) -> Event:
         event.threshold = 0.82
         event.tolerance = 82
         event.template = ""
+        event.click_on_find = False
+        event.click_anchor = "center"
+        event.on_found = "continue"
+        event.on_miss = "stop"
     if kind == EventType.WAIT_PIXEL:
         event.color = "#34C759"
         event.match = "is"

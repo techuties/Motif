@@ -48,6 +48,8 @@ Replay of a Mac-recorded Switch app / Space row off Mac does not invent a virtua
 
 ## Motif.app and Applications
 
+Full ship checklist (macOS + Linux tarball): [`docs/SHIP.md`](docs/SHIP.md).
+
 The project copy lives next to this README:
 
 ```
@@ -158,6 +160,25 @@ If you previously allowed Terminal or Python, you can leave those on; Motif.app 
 Motifs are saved as `.motif.json`. Coordinates are stored relative to a **zero-ground origin** so loops stay aligned if you move that origin. Values are **global logical points** on the whole virtual desktop (extra monitors included, Retina points not physical pixels).
 
 **Replay at recorded origin** (default) plays back on the same display(s) you recorded, even if the Motif window is on another screen. **Replay from current cursor** shifts the whole path to wherever the mouse is — if you click Replay on a second monitor, that is where it runs.
+
+
+
+## Roadmap packs A–E (shipped)
+
+Market packs landed on `dev` without turning Motif into Keyboard Maestro:
+
+- **A — Smart image click + branches** — `wait_image` / `wait_pixel` can click the match (anchor: center/tl/tr/bl/br). Optional event `label` with `on_found` / `on_miss`: `continue` | `stop` | `goto:<label>` (goto jumps capped per run). Inspector fields for template, threshold, click-on-find, anchor, branches.
+- **B — Window-relative / smart-rec** — Optional mode stores window metadata and maps coords back into the live window on replay. macOS preferred (Quartz); Linux/Windows degrade with a clear status. Preferences + inspector toggle.
+- **C — Tray + schedule + hotkey library** — System tray: Show, Record, Replay last, Quit. Bind saved motifs to custom global hotkeys (beyond F9/F10). Simple in-app daily/delay scheduler while Motif is running. Preferences persist all of the above.
+- **D — Humanization polish** — Precise / Natural / Cautious actually differ (path style + delay/path jitter). Clear Feel tooltips. Seeded tests assert preset differences.
+- **E — Ship / portable** — macOS ship checklist in [`docs/SHIP.md`](docs/SHIP.md) (`start.py app` / `install`). Linux: [`scripts/linux-bundle.sh`](scripts/linux-bundle.sh) tarball recipe. Optional ad-hoc codesign note only — no Apple cert required. Windows: brief future note.
+
+## Humanize feels
+
+- **precise** — recorded path, no extra path/delay jitter (default TinyTask-faithful replay).
+- **natural** — bezier travel with light timing, click, and path jitter.
+- **cautious** — overshoot paths, slower Fitts travel, stronger jitter for “careful” UI.
+- **custom** — pick Default path yourself; Motif marks Feel as custom when you diverge from a preset.
 
 ## External trigger / Local API
 

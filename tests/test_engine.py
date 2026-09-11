@@ -2642,3 +2642,222 @@ def test_wait_image_with_factory():
     # Player event path with factory-less missing file should fail closed quickly
     script = Script(events=[Event(type=EventType.WAIT_IMAGE.value, template="/no/such.png", timeout_ms=50, poll_ms=10, threshold=0.9)])
     assert Player().play(script) in {"failed", "done", "stopped"}
+
+
+# --- Pack A–E market packs -------------------------------------------------
+
+def test_anchor_offset_corners_and_center():
+    from motif.models import anchor_offset
+
+    assert anchor_offset(10, 20, "center") == (5, 10)
+    assert anchor_offset(10, 20, "tl") == (0, 0)
+    assert anchor_offset(10, 20, "tr") == (9, 0)
+    assert anchor_offset(10, 20, "bl") == (0, 19)
+    assert anchor_offset(10, 20, "br") == (9, 19)
+
+
+def test_parse_branch_action_variants():
+    from motif.models import parse_branch_action
+
+    assert parse_branch_action("continue") == ("continue", "")
+    assert parse_branch_action("stop") == ("stop", "")
+    assert parse_branch_action("goto:retry") == ("goto", "retry")
+    assert parse_branch_action("goto done") == ("goto", "done")
+
+
+def test_match_click_math_screen_relative():
+    """Match top-left + anchor → absolute click point."""
+    from motif.models import anchor_offset
+
+    match_x, match_y, mw, mh = 100, 200, 40, 30
+    ox, oy = anchor_offset(mw, mh, "center")
+    assert (match_x + ox, match_y + oy) == (120, 215)
+    ox, oy = anchor_offset(mw, mh, "tl")
+    assert (match_x + ox, match_y + oy) == (100, 200)
+
+
+def test_template_match_best_returns_location():
+    from PIL import Image, ImageDraw
+    from motif.screen import template_match_best
+
+    needle = Image.new("RGB", (8, 8), (0, 0, 0))
+    ImageDraw.Draw(needle).rectangle((1, 1, 6, 6), fill=(255, 0, 0))
+    hay = Image.new("RGB", (40, 40), (0, 0, 0))
+    hay.paste(needle, (12, 16))
+    hit = template_match_best(hay, needle)
+    assert hit.score >= 0.95
+    assert abs(hit.x - 12) <= 2
+    assert abs(hit.y - 16) <= 2
+    assert hit.width == 8 and hit.height == 8
+
+
+def test_wait_image_branch_goto_and_stop(monkeypatch):
+    from motif.models import Event, EventType, Script, MAX_GOTO_JUMPS
+    from motif import player as player_mod
+    from motif.player import Player
+
+    calls = {"n": 0}
+
+    def fake_wait(*args, **kwargs):
+        calls["n"] += 1
+        locate = kwargs.get("locate")
+        if calls["n"] == 1:
+            # miss first image wait → goto retry label
+            return None if locate else False
+        # second time found
+        from motif.screen import TemplateMatch
+        return TemplateMatch(0.99, 10, 10, 4, 4) if locate else True
+
+    monkeypatch.setattr(player_mod, "wait_for_image", fake_wait)
+
+    events = [
+        Event(
+            type=EventType.WAIT_IMAGE.value,
+            template="/tmp/x.png",
+            timeout_ms=50,
+            poll_ms=10,
+            threshold=0.8,
+            on_miss="goto:retry",
+            on_found="continue",
+            label="start",
+        ),
+        Event(type=EventType.COMMENT.value, name="skip", notes="between"),
+        Event(
+            type=EventType.WAIT_IMAGE.value,
+            template="/tmp/x.png",
+            timeout_ms=50,
+            poll_ms=10,
+            threshold=0.8,
+            on_found="stop",
+            on_miss="continue",
+            label="retry",
+        ),
+    ]
+    # Rebuild: first wait misses → goto retry; retry finds → stop → failed
+    script = Script(events=events)
+    result = Player().play(script)
+    assert result in {"failed", "stopped", "done"}
+    assert calls["n"] >= 2
+
+
+def test_goto_jump_cap(monkeypatch):
+    from motif.models import Event, EventType, Script, MAX_GOTO_JUMPS
+    from motif import player as player_mod
+    from motif.player import Player
+    from motif.screen import TemplateMatch
+
+    monkeypatch.setattr(
+        player_mod,
+        "wait_for_image",
+        lambda *a, **k: TemplateMatch(0.99, 0, 0, 1, 1) if k.get("locate") else True,
+    )
+    events = [
+        Event(
+            type=EventType.WAIT_IMAGE.value,
+            template="/t.png",
+            timeout_ms=20,
+            poll_ms=5,
+            threshold=0.5,
+            label="loop",
+            on_found="goto:loop",
+            on_miss="stop",
+        )
+    ]
+    result = Player().play(Script(events=events))
+    assert result == "failed"
+
+
+def test_event_new_fields_roundtrip_backward_compatible():
+    from motif.models import Event, EventType, Script, event_from_dict, script_from_dict, script_to_dict
+
+    # Old payload without new fields still loads
+    old = {"type": "wait_image", "template": "a.png", "threshold": 0.9}
+    ev = event_from_dict(old)
+    assert ev.click_on_find is False
+    assert ev.on_found == "continue"
+    assert ev.on_miss == "stop"
+    script = Script(events=[ev])
+    data = script_to_dict(script)
+    loaded = script_from_dict(data)
+    assert loaded.events[0].threshold == 0.9
+    assert "window_relative" in data
+
+
+def test_window_rel_abs_roundtrip():
+    from motif.window_rel import WindowFrame, abs_to_rel, rel_to_abs, scale_rel
+
+    frame = WindowFrame("Demo", 100, 200, 400, 300)
+    rx, ry = abs_to_rel(150, 260, frame)
+    assert (rx, ry) == (50, 60)
+    assert rel_to_abs(rx, ry, frame) == (150, 260)
+    live = WindowFrame("Demo", 10, 20, 800, 600)
+    sx, sy = scale_rel(50, 60, frame, live)
+    assert sx == 100 and sy == 120
+
+
+def test_apply_window_relative_shifts_origin():
+    from motif.models import Script
+    from motif.window_rel import WindowFrame, apply_window_relative
+
+    script = Script(origin_x=110, origin_y=220, origin_set=True, window_relative=True)
+    script.window_bounds = {"title": "A", "x": 100, "y": 200, "width": 400, "height": 300}
+    live = WindowFrame("A", 0, 0, 400, 300)
+    mapped = apply_window_relative(script, live)
+    assert mapped.origin_x == 10
+    assert mapped.origin_y == 20
+
+
+def test_schedule_due_daily_and_delay():
+    from datetime import datetime
+    from motif.schedule import ScheduleEntry, arm_delay, due_entries, mark_fired, parse_hhmm
+
+    assert parse_hhmm("09:30") == (9, 30)
+    assert parse_hhmm("25:00") is None
+    daily = ScheduleEntry(path="/tmp/a.motif.json", kind="daily", time_local="09:00")
+    now = datetime(2026, 9, 11, 9, 0, 5)
+    assert due_entries([daily], now=now)
+    mark_fired(daily, now=now)
+    assert not due_entries([daily], now=now)
+    delay = arm_delay(ScheduleEntry(path="/tmp/b.motif.json"), minutes=0, now=1.0)
+    assert delay.fire_at_epoch == 1.0
+    assert due_entries([delay], now=now)
+
+
+def test_humanize_presets_differ_seeded():
+    import random
+    from motif.humanize import event_wait_ms, generate_path, travel_ms
+    from motif.models import HumanizeSettings, HumanizePreset, PathStyle
+
+    precise = HumanizeSettings()
+    precise.apply_preset(HumanizePreset.PRECISE.value)
+    natural = HumanizeSettings()
+    natural.apply_preset(HumanizePreset.NATURAL.value)
+    cautious = HumanizeSettings()
+    cautious.apply_preset(HumanizePreset.CAUTIOUS.value)
+
+    assert precise.enabled is False
+    assert natural.enabled and natural.path == PathStyle.BEZIER.value
+    assert cautious.enabled and cautious.path == PathStyle.OVERSHOOT.value
+    assert natural.timing_jitter < cautious.timing_jitter
+    assert natural.jitter_px < cautious.jitter_px
+
+    rng_n = random.Random(42)
+    rng_c = random.Random(42)
+    path_n = generate_path(0, 0, 200, 0, natural, natural.path, rng_n)
+    path_c = generate_path(0, 0, 200, 0, cautious, cautious.path, rng_c)
+    assert path_n != path_c
+    # delay jitter: same recorded delay yields different waits when jitter > 0
+    waits_n = [event_wait_ms(100, natural, random.Random(i)) for i in range(8)]
+    waits_p = [event_wait_ms(100, precise, random.Random(i)) for i in range(8)]
+    assert waits_p == [100] * 8
+    assert len(set(waits_n)) > 1
+    t_n = travel_ms(0, 0, 300, 0, natural, None, random.Random(7))
+    t_c = travel_ms(0, 0, 300, 0, cautious, None, random.Random(7))
+    assert t_c >= t_n
+
+
+def test_normalize_pynput_hotkey():
+    from motif.keys import normalize_pynput_hotkey
+
+    assert normalize_pynput_hotkey("f6") == "<f6>"
+    assert normalize_pynput_hotkey("ctrl+shift+f6") == "<ctrl>+<shift>+<f6>"

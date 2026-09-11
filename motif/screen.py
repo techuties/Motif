@@ -338,15 +338,30 @@ def _pixels(img: Image.Image) -> list[int]:
     return list(img.getdata())
 
 
-def template_score(haystack: Image.Image, needle: Image.Image) -> float:
-    """Return best score in 0..1 via mean absolute difference (1 = identical)."""
+@dataclass(frozen=True)
+class TemplateMatch:
+    """Best template hit in haystack pixel space (or screen logical when region given)."""
+
+    score: float
+    x: int = 0
+    y: int = 0
+    width: int = 0
+    height: int = 0
+
+    def __bool__(self) -> bool:
+        return self.score > 0.0
+
+
+def template_match_best(haystack: Image.Image, needle: Image.Image) -> TemplateMatch:
+    """Return best score and top-left in haystack pixels (coarse grid search)."""
     hay = haystack.convert("L")
     need = needle.convert("L")
-    if need.width > hay.width or need.height > hay.height:
-        return 0.0
-    best = 0.0
-    hw, hh = hay.size
     nw, nh = need.size
+    if need.width > hay.width or need.height > hay.height:
+        return TemplateMatch(0.0, 0, 0, nw, nh)
+    best = 0.0
+    best_xy = (0, 0)
+    hw, hh = hay.size
     need_px = _pixels(need)
     step_y = max(1, nh // 6)
     step_x = max(1, nw // 6)
@@ -355,8 +370,16 @@ def template_score(haystack: Image.Image, needle: Image.Image) -> float:
         for x in range(0, hw - nw + 1, step_x):
             crop = _pixels(hay.crop((x, y, x + nw, y + nh)))
             diff = sum(abs(a - b) for a, b in zip(crop, need_px)) / denom
-            best = max(best, 1.0 - diff)
-    return best
+            score = 1.0 - diff
+            if score > best:
+                best = score
+                best_xy = (x, y)
+    return TemplateMatch(best, best_xy[0], best_xy[1], nw, nh)
+
+
+def template_score(haystack: Image.Image, needle: Image.Image) -> float:
+    """Return best score in 0..1 via mean absolute difference (1 = identical)."""
+    return template_match_best(haystack, needle).score
 
 
 def match_template_file(
@@ -367,22 +390,38 @@ def match_template_file(
     width: int = 0,
     height: int = 0,
     haystack: Image.Image | None = None,
-) -> float:
-    """Score template against a screen region or provided haystack image."""
-    from pathlib import Path
+    locate: bool = False,
+) -> float | TemplateMatch:
+    """Score template against a screen region or provided haystack image.
 
-    path = Path(template_path)
+    When locate=True, return TemplateMatch with screen-logical top-left when a
+    region was grabbed (logical_x/y + haystack offset).
+    """
+    from pathlib import Path as _Path
+
+    path = _Path(template_path)
     if not path.is_file():
-        return 0.0
+        return TemplateMatch(0.0) if locate else 0.0
     needle = Image.open(path).convert("RGB")
+    region_x, region_y = logical_x, logical_y
     if haystack is None:
         if width <= 0 or height <= 0:
-            # full virtual desktop grab is expensive; require region or haystack in tests
             displays = current_displays()
             vx, vy, vw, vh = virtual_rect(displays)
             logical_x, logical_y, width, height = vx, vy, vw, vh
+            region_x, region_y = logical_x, logical_y
         haystack = grab_region(logical_x, logical_y, width, height)
-    return template_score(haystack, needle)
+        region_x, region_y = logical_x, logical_y
+    hit = template_match_best(haystack, needle)
+    if locate:
+        return TemplateMatch(
+            hit.score,
+            int(region_x) + hit.x,
+            int(region_y) + hit.y,
+            hit.width,
+            hit.height,
+        )
+    return hit.score
 
 
 def wait_for_image(
@@ -397,8 +436,13 @@ def wait_for_image(
     width: int = 0,
     height: int = 0,
     haystack_factory=None,
-) -> bool:
-    """Poll until template score >= threshold (0..1) or tolerance/100 if >1."""
+    locate: bool = False,
+) -> bool | TemplateMatch | None:
+    """Poll until template score >= threshold.
+
+    Returns True/False by default (backward compatible). With locate=True,
+    returns TemplateMatch on hit or None on miss/stop.
+    """
     threshold = float(tolerance_or_threshold)
     if threshold > 1.0:
         threshold = threshold / 100.0
@@ -407,17 +451,19 @@ def wait_for_image(
     interval = max(poll_ms, 10) / 1000.0
     while time.monotonic() < deadline:
         if should_stop():
-            return False
+            return None if locate else False
         hay = haystack_factory() if haystack_factory else None
-        score = match_template_file(
+        hit = match_template_file(
             template_path,
             logical_x=logical_x,
             logical_y=logical_y,
             width=width,
             height=height,
             haystack=hay,
+            locate=True,
         )
-        if score >= threshold:
-            return True
+        assert isinstance(hit, TemplateMatch)
+        if hit.score >= threshold:
+            return hit if locate else True
         time.sleep(interval)
-    return False
+    return None if locate else False

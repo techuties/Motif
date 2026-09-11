@@ -121,12 +121,52 @@ def pynput_exit_hotkey() -> str:
     return "<ctrl>+<alt>+<esc>"
 
 
-class GlobalHotkeys:
-    """pynput GlobalHotKeys — same path as F9/F10, works when Motif is not focused."""
+def normalize_pynput_hotkey(spec: str) -> str:
+    """Accept 'f6', '<f6>', 'ctrl+shift+f6' → pynput GlobalHotKeys form."""
+    raw = (spec or "").strip().lower().replace(" ", "")
+    if not raw:
+        return ""
+    if raw.startswith("<") and raw.endswith(">"):
+        return raw
+    parts = [p for p in raw.replace("-", "+").split("+") if p]
+    if not parts:
+        return ""
+    mapped = []
+    for part in parts[:-1]:
+        if part in {"ctrl", "control", "ctl"}:
+            mapped.append("<ctrl>")
+        elif part in {"alt", "option"}:
+            mapped.append("<alt>")
+        elif part in {"shift"}:
+            mapped.append("<shift>")
+        elif part in {"cmd", "command", "super", "meta", "win"}:
+            mapped.append("<cmd>")
+        else:
+            mapped.append(f"<{part}>")
+    last = parts[-1]
+    mapped.append(f"<{last}>" if not (last.startswith("<") and last.endswith(">")) else last)
+    return "+".join(mapped)
 
-    def __init__(self, on_hotkey: Callable[[str], None]) -> None:
+
+class GlobalHotkeys:
+    """pynput GlobalHotKeys — F9/F10/exit plus optional motif library bindings."""
+
+    def __init__(
+        self,
+        on_hotkey: Callable[[str], None],
+        extra: dict[str, str] | None = None,
+    ) -> None:
         self.on_hotkey = on_hotkey
+        self.extra = dict(extra or {})  # pynput_hotkey -> action name (play_path:…)
         self._listener = None
+
+    def set_extra(self, extra: dict[str, str] | None) -> None:
+        self.extra = dict(extra or {})
+        self.restart()
+
+    def restart(self) -> None:
+        self.stop()
+        self.start()
 
     def start(self) -> None:
         if self._listener is not None:
@@ -134,13 +174,18 @@ class GlobalHotkeys:
         try:
             from pynput.keyboard import GlobalHotKeys
 
-            self._listener = GlobalHotKeys(
-                {
-                    pynput_exit_hotkey(): lambda: self.on_hotkey("stop"),
-                    "<f9>": lambda: self.on_hotkey("record"),
-                    "<f10>": lambda: self.on_hotkey("play"),
-                }
-            )
+            mapping = {
+                pynput_exit_hotkey(): lambda: self.on_hotkey("stop"),
+                "<f9>": lambda: self.on_hotkey("record"),
+                "<f10>": lambda: self.on_hotkey("play"),
+            }
+            for hotkey, action in self.extra.items():
+                key = normalize_pynput_hotkey(hotkey)
+                if not key or key in mapping:
+                    continue
+                # bind action string by default-arg capture
+                mapping[key] = (lambda act=action: self.on_hotkey(act))
+            self._listener = GlobalHotKeys(mapping)
             self._listener.start()
         except Exception:
             self._listener = None

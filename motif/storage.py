@@ -22,6 +22,12 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     # text scale. Stored as strings/floats so an unknown value falls back safely.
     "theme": "night",
     "text_scale": 1.0,
+    # Pack B / C
+    "window_relative_default": False,
+    "tray_enabled": True,
+    "motif_hotkeys": [],  # [{hotkey: "<f6>", path: "/…/x.motif.json"}]
+    "schedules": [],  # ScheduleEntry dicts
+    "last_motif_path": "",
 }
 
 
@@ -127,8 +133,14 @@ def load_settings() -> dict[str, Any]:
         if isinstance(default, bool):
             data[key] = bool(value)
         elif isinstance(default, list):
-            if isinstance(value, list) and value and all(isinstance(x, (int, float)) for x in value):
+            if not isinstance(value, list):
+                continue
+            if key in {"motif_hotkeys", "schedules"}:
+                data[key] = [dict(x) for x in value if isinstance(x, dict)]
+            elif value and all(isinstance(x, (int, float)) for x in value):
                 data[key] = [int(x) for x in value]
+            elif not value:
+                data[key] = []
         else:
             data[key] = value
     return data

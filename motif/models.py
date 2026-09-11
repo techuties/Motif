@@ -196,6 +196,11 @@ class Event:
     bundle_id: str = ""
     template: str = ""  # path to template image for wait_image
     threshold: float = 0.82  # template match score 0..1
+    label: str = ""  # optional branch target for goto:<label>
+    click_on_find: bool = False  # move/click at match on wait_image/wait_pixel
+    click_anchor: str = "center"  # center|tl|tr|bl|br
+    on_found: str = "continue"  # continue|stop|goto:<label>
+    on_miss: str = "stop"  # continue|stop|goto:<label>
 
     def type_enum(self) -> EventType:
         try:
@@ -241,7 +246,8 @@ class Event:
             return f"Pixel {self.x}, {self.y} leaves {self.color}"
         if kind == EventType.WAIT_IMAGE:
             name = Path(self.template).name if self.template else "template"
-            return f"Find {name} ≥ {self.threshold:.0%}"
+            click = " → click" if self.click_on_find else ""
+            return f"Find {name} ≥ {self.threshold:.0%}{click}"
         if kind == EventType.GO_ORIGIN:
             return "Return to zero ground"
         if kind == EventType.COMMENT:
@@ -276,6 +282,10 @@ class Script:
     notes: str = ""
     preserve_micro_jitter: bool = False
     displays: list[dict[str, Any]] = field(default_factory=list)
+    window_relative: bool = False
+    window_title: str = ""
+    window_title_pattern: str = ""
+    window_bounds: dict[str, Any] = field(default_factory=dict)
 
     def enabled_events(self) -> list[Event]:
         return [e for e in self.events if e.enabled]
@@ -314,6 +324,16 @@ def event_from_dict(data: dict[str, Any]) -> Event:
     for key in ("duration_ms", "travel_ms"):
         if key in payload and payload[key] is not None:
             payload[key] = _as_int(payload[key])
+    if "threshold" in payload and payload["threshold"] is not None:
+        try:
+            payload["threshold"] = float(payload["threshold"])
+        except (TypeError, ValueError):
+            payload["threshold"] = 0.82
+    if "click_on_find" in payload:
+        payload["click_on_find"] = bool(payload["click_on_find"])
+    for key in ("label", "click_anchor", "on_found", "on_miss"):
+        if key in payload and payload[key] is not None:
+            payload[key] = str(payload[key])
     return Event(**payload)
 
 
@@ -553,6 +573,10 @@ def script_to_dict(script: Script) -> dict[str, Any]:
         "notes": script.notes,
         "preserve_micro_jitter": bool(script.preserve_micro_jitter),
         "displays": list(script.displays or []),
+        "window_relative": bool(script.window_relative),
+        "window_title": script.window_title or "",
+        "window_title_pattern": script.window_title_pattern or "",
+        "window_bounds": dict(script.window_bounds or {}),
         "kind": "motif",
     }
 
@@ -810,6 +834,10 @@ def script_from_dict(data: dict[str, Any]) -> Script:
         notes=str(data.get("notes") or ""),
         preserve_micro_jitter=bool(data.get("preserve_micro_jitter")),
         displays=[dict(d) for d in (data.get("displays") or []) if isinstance(d, dict)],
+        window_relative=bool(data.get("window_relative")),
+        window_title=str(data.get("window_title") or ""),
+        window_title_pattern=str(data.get("window_title_pattern") or ""),
+        window_bounds=dict(data.get("window_bounds") or {}) if isinstance(data.get("window_bounds"), dict) else {},
     )
 
 
@@ -995,3 +1023,50 @@ def fingerprint_mismatch(
         if abs(float(ra.get("scale") or 1) - float(rb.get("scale") or 1)) > 0.05:
             return f"Display {i + 1} scale changed."
     return None
+
+
+# --- Pack A: image-click anchors + lightweight branches -----------------
+
+CLICK_ANCHORS = ("center", "tl", "tr", "bl", "br")
+BRANCH_CONTINUE = "continue"
+BRANCH_STOP = "stop"
+MAX_GOTO_JUMPS = 64
+
+
+def parse_branch_action(action: str) -> tuple[str, str]:
+    """Return (kind, label) where kind is continue|stop|goto."""
+    raw = (action or BRANCH_CONTINUE).strip()
+    lowered = raw.lower()
+    if lowered == BRANCH_STOP or lowered.startswith("stop"):
+        return BRANCH_STOP, ""
+    if lowered.startswith("goto:"):
+        return "goto", raw.split(":", 1)[1].strip()
+    if lowered.startswith("goto "):
+        return "goto", raw.split(None, 1)[1].strip()
+    return BRANCH_CONTINUE, ""
+
+
+def anchor_offset(width: int, height: int, anchor: str = "center") -> tuple[int, int]:
+    """Pixel offset inside a match rect for click_on_find."""
+    w = max(1, int(width))
+    h = max(1, int(height))
+    name = (anchor or "center").strip().lower()
+    if name in {"tl", "top-left", "topleft"}:
+        return 0, 0
+    if name in {"tr", "top-right", "topright"}:
+        return w - 1, 0
+    if name in {"bl", "bottom-left", "bottomleft"}:
+        return 0, h - 1
+    if name in {"br", "bottom-right", "bottomright"}:
+        return w - 1, h - 1
+    return w // 2, h // 2
+
+
+def label_index_map(events: list[Event]) -> dict[str, int]:
+    """First index of each non-empty event.label (case-sensitive)."""
+    out: dict[str, int] = {}
+    for i, event in enumerate(events):
+        lab = (event.label or "").strip()
+        if lab and lab not in out:
+            out[lab] = i
+    return out

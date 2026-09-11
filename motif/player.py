@@ -26,20 +26,26 @@ from motif.humanize import (
 from motif.keys import name_to_key
 from motif.macos import activate_app, post_space_switch
 from motif.models import (
+    BRANCH_STOP,
     FINAL_SWIPE_SETTLE_MS,
+    MAX_GOTO_JUMPS,
     SPACE_SETTLE_MS,
     Event,
     EventType,
     PathStyle,
     PlayMode,
     Script,
+    anchor_offset,
     direction_from_delta,
     is_snap_path,
+    label_index_map,
+    parse_branch_action,
     parse_ctrl_arrow,
     screen_pos,
     should_auto_align,
 )
 from motif.screen import grab_pixel, wait_for_image, wait_for_pixel, wait_for_pixel_change
+from motif.window_rel import apply_window_relative, resolve_live_window, window_status
 
 BUTTONS = {
     "left": Button.left,
@@ -71,6 +77,7 @@ class Player:
         self.index = -1
         self._held_buttons: set = set()
         self._held_keys: set = set()
+        self._branch_goto = ""
 
     def request_stop(self) -> None:
         self.stop_flag.set()
@@ -272,8 +279,9 @@ class Player:
                 event.poll_ms,
                 self.stop_flag.is_set,
             )
-            return ok and not self.stop_flag.is_set()
-
+            if self.stop_flag.is_set():
+                return False
+            return self._after_wait_branch(script, event, ok, ax, ay, 1, 1, rng, cursor0)
 
         if kind == EventType.WAIT_IMAGE:
             ax, ay = self._abs(script, event.x, event.y, cursor0)
@@ -281,7 +289,7 @@ class Player:
             w = int(event.dx) if event.dx else 0
             h = int(event.dy) if event.dy else 0
             threshold = float(event.threshold) if event.threshold else max(0.5, (event.tolerance or 82) / 100.0)
-            ok = wait_for_image(
+            hit = wait_for_image(
                 event.template,
                 threshold,
                 event.timeout_ms,
@@ -291,8 +299,16 @@ class Player:
                 logical_y=ay,
                 width=w,
                 height=h,
+                locate=True,
             )
-            return ok and not self.stop_flag.is_set()
+            if self.stop_flag.is_set():
+                return False
+            found = hit is not None and getattr(hit, "score", 0) > 0
+            mx = int(getattr(hit, "x", ax)) if found else ax
+            my = int(getattr(hit, "y", ay)) if found else ay
+            mw = int(getattr(hit, "width", 1) or 1) if found else 1
+            mh = int(getattr(hit, "height", 1) or 1) if found else 1
+            return self._after_wait_branch(script, event, found, mx, my, mw, mh, rng, cursor0)
 
         if kind == EventType.WAIT_PIXEL_CHANGE:
             ax, ay = self._abs(script, event.x, event.y, cursor0)
@@ -312,42 +328,109 @@ class Player:
 
         return True
 
+    def _after_wait_branch(
+        self,
+        script: Script,
+        event: Event,
+        found: bool,
+        match_x: int,
+        match_y: int,
+        match_w: int,
+        match_h: int,
+        rng: random.Random,
+        cursor0: tuple[int, int],
+    ) -> bool:
+        """Click-on-find + on_found/on_miss. Sets self._branch_goto on goto."""
+        action = event.on_found if found else event.on_miss
+        kind, label = parse_branch_action(action)
+        if found and event.click_on_find:
+            ox, oy = anchor_offset(match_w, match_h, event.click_anchor)
+            # match coords are absolute screen; convert to origin-relative for _move_to
+            rel_x = int(match_x + ox) - script.origin_x
+            rel_y = int(match_y + oy) - script.origin_y
+            if script.play_mode == PlayMode.FROM_CURSOR.value:
+                rel_x = int(match_x + ox) - cursor0[0]
+                rel_y = int(match_y + oy) - cursor0[1]
+            click = Event(
+                type=EventType.CLICK.value,
+                x=rel_x,
+                y=rel_y,
+                pressed=True,
+                button="left",
+                duration_ms=50,
+            )
+            if not self._play_event(script, click, rng, cursor0, []):
+                return False
+        if kind == BRANCH_STOP:
+            return False
+        if kind == "goto" and label:
+            self._branch_goto = label
+            return True
+        return True
+
     def play(self, script: Script) -> str:
         self.stop_flag.clear()
         self.busy = True
         self.cycle = 0
         self.index = -1
+        self._branch_goto = ""
         rng = random.Random()
         loops = script.loop.count
         forever = loops <= 0
+        # Pack B: map origin/coords into live window when requested
+        play_script = script
+        if script.window_relative:
+            live, status = resolve_live_window(script)
+            if status:
+                # Soft warning only — still try absolute if window missing
+                pass
+            if live is not None:
+                play_script = apply_window_relative(script, live)
         try:
             while forever or self.cycle < loops:
                 if self.stop_flag.is_set():
                     return "stopped"
                 self.cycle += 1
                 cursor0 = self._cursor()
-                if script.play_mode == PlayMode.FROM_ORIGIN.value:
-                    cursor0 = (script.origin_x, script.origin_y)
-                if should_auto_align(script, returning=False):
-                    if not self._park(script, rng, cursor0, "Park"):
+                if play_script.play_mode == PlayMode.FROM_ORIGIN.value:
+                    cursor0 = (play_script.origin_x, play_script.origin_y)
+                if should_auto_align(play_script, returning=False):
+                    if not self._park(play_script, rng, cursor0, "Park"):
                         return "stopped"
-                    if script.play_mode == PlayMode.FROM_CURSOR.value:
+                    if play_script.play_mode == PlayMode.FROM_CURSOR.value:
                         cursor0 = self._cursor()
-                events = script.enabled_events()
-                for i, event in enumerate(events):
+                events = play_script.enabled_events()
+                labels = label_index_map(events)
+                i = 0
+                goto_jumps = 0
+                while i < len(events):
                     if self.stop_flag.is_set():
                         return "stopped"
+                    event = events[i]
                     self.index = i
+                    self._branch_goto = ""
                     if self.on_progress:
                         self.on_progress(self.cycle, i, event.display_name())
-                    if not self._play_event(script, event, rng, cursor0, events[i + 1 :]):
+                    ok = self._play_event(play_script, event, rng, cursor0, events[i + 1 :])
+                    if not ok:
                         return "stopped" if self.stop_flag.is_set() else "failed"
-                if should_auto_align(script, returning=True):
-                    if not self._park(script, rng, cursor0, "Return"):
+                    if self._branch_goto:
+                        target = labels.get(self._branch_goto.strip())
+                        self._branch_goto = ""
+                        if target is None:
+                            return "failed"
+                        goto_jumps += 1
+                        if goto_jumps > MAX_GOTO_JUMPS:
+                            return "failed"
+                        i = target
+                        continue
+                    i += 1
+                if should_auto_align(play_script, returning=True):
+                    if not self._park(play_script, rng, cursor0, "Return"):
                         return "stopped"
                 if not forever and self.cycle >= loops:
                     break
-                if not self._sleep(scale_ms(script.loop.gap_ms, script.humanize)):
+                if not self._sleep(scale_ms(play_script.loop.gap_ms, play_script.humanize)):
                     return "stopped"
             return "done"
         finally:
