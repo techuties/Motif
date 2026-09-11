@@ -146,6 +146,15 @@ If you previously allowed Terminal or Python, you can leave those on; Motif.app 
 
 ## Scripts
 
+**Stroke quality:** recording samples denser when the cursor slows (near clicks). Enable *Preserve micro-jitter while recording* in the inspector to keep sub-3px tremor.
+
+**Display resilience:** motifs store a display fingerprint; Motif warns in the status bar if the layout changed since capture.
+
+**Pro edit:** Edit menu — Split Move, Merge Moves, Stretch Delays ×1.5 (`Ctrl+Shift+D`) on the selection.
+
+**When image:** add a `wait_image` step with a template PNG path; replay waits until that image appears (mss + Pillow). Colour pixel waits remain available.
+
+
 Motifs are saved as `.motif.json`. Coordinates are stored relative to a **zero-ground origin** so loops stay aligned if you move that origin. Values are **global logical points** on the whole virtual desktop (extra monitors included, Retina points not physical pixels).
 
 **Replay at recorded origin** (default) plays back on the same display(s) you recorded, even if the Motif window is on another screen. **Replay from current cursor** shifts the whole path to wherever the mouse is — if you click Replay on a second monitor, that is where it runs.

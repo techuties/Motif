@@ -57,6 +57,12 @@ from motif.keys import (
     exit_qt_sequence,
 )
 from motif.models import (
+    fingerprint_from_displays,
+    fingerprint_mismatch,
+    merge_moves,
+    split_move,
+    stretch_delays,
+
     CYCLE_LABELS,
     CYCLE_PRESETS,
     EVENT_LABELS,
@@ -379,6 +385,12 @@ class MainWindow(QMainWindow):
         save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
 
         edit = self.menuBar().addMenu("Edit")
+        edit.addSeparator()
+        edit.addAction("Split Move", self.split_selected_move)
+        edit.addAction("Merge Moves", self.merge_selected_moves)
+        stretch = edit.addAction("Stretch Delays ×1.5", self.stretch_selected_delays)
+        stretch.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        # placeholder
         self.undo_act = QAction("Undo", self)
         self.undo_act.setShortcut(QKeySequence.StandardKey.Undo)
         self.undo_act.triggered.connect(self.undo)
@@ -1462,6 +1474,86 @@ class MainWindow(QMainWindow):
             if not self.worker:
                 self.status.showMessage(self._idle_status())
 
+
+    def _warn_display_mismatch(self) -> None:
+        warning = fingerprint_mismatch(self.script.displays, fingerprint_from_displays(
+            # use cached screen module displays
+            __import__("motif.screen", fromlist=["current_displays"]).current_displays()
+        ))
+        if warning:
+            self.status.showMessage(f"Display layout: {warning}")
+            announce(self, warning)
+
+    def selected_events(self) -> list:
+        ids = set(self.list.selected_ids()) if hasattr(self.list, "selected_ids") else set()
+        if not ids:
+            cur = self.current_event()
+            return [cur] if cur else []
+        return [e for e in self.script.events if e.id in ids]
+
+    def split_selected_move(self) -> None:
+        event = self.current_event()
+        if event is None or event.type_enum() != EventType.MOVE or len(event.points) < 4:
+            self.status.showMessage("Select a MOVE with at least 4 points to split.")
+            return
+        mid = len(event.points) // 2
+        left, right = split_move(event, mid)
+        idx = self.script.events.index(event)
+        self._push_undo()
+        self.script.events[idx:idx+1] = [left, right]
+        self.dirty = True
+        self.refresh()
+        self.status.showMessage("Split move into two strokes.")
+
+    def merge_selected_moves(self) -> None:
+        chosen = self.selected_events()
+        if len(chosen) != 2:
+            # try current + next
+            cur = self.current_event()
+            if cur is None:
+                self.status.showMessage("Select two MOVE steps to merge.")
+                return
+            try:
+                i = self.script.events.index(cur)
+            except ValueError:
+                return
+            if i + 1 >= len(self.script.events):
+                self.status.showMessage("Select two MOVE steps to merge.")
+                return
+            chosen = [cur, self.script.events[i + 1]]
+        a, b = chosen[0], chosen[1]
+        if a.type_enum() != EventType.MOVE or b.type_enum() != EventType.MOVE:
+            self.status.showMessage("Both steps must be MOVE events.")
+            return
+        try:
+            i = self.script.events.index(a)
+            j = self.script.events.index(b)
+        except ValueError:
+            return
+        if abs(i - j) != 1:
+            self.status.showMessage("MOVE steps must be adjacent to merge.")
+            return
+        first, second = (a, b) if i < j else (b, a)
+        merged = merge_moves(first, second)
+        self._push_undo()
+        lo = min(i, j)
+        self.script.events[lo:lo+2] = [merged]
+        self.dirty = True
+        self.refresh()
+        self.status.showMessage("Merged two moves.")
+
+    def stretch_selected_delays(self) -> None:
+        chosen = self.selected_events()
+        if not chosen:
+            self.status.showMessage("Select steps to stretch delays.")
+            return
+        # 1.5× stretch — simple pro default; dialog later
+        self._push_undo()
+        stretch_delays(chosen, 1.5)
+        self.dirty = True
+        self.refresh()
+        self.status.showMessage(f"Stretched delays ×1.5 on {len(chosen)} step(s).")
+
     def _sync_screen_view(self) -> None:
         app = QApplication.instance()
         screens = list(app.screens()) if app is not None else []
@@ -1489,6 +1581,7 @@ class MainWindow(QMainWindow):
             self.screen_view.set_displays(displays, QRect(x, y, width, height))
         elif window_screen is not None:
             self.screen_view.set_screen_rect(window_screen.geometry())
+        self._warn_display_mismatch()
 
     def _sane_sizes(self, values: object, fallback: list[int], mins: list[int]) -> list[int]:
         if not isinstance(values, list) or len(values) != len(fallback):

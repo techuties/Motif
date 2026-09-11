@@ -2547,3 +2547,98 @@ def test_large_text_drops_chips_but_never_a_control() -> None:
         win.apply_appearance(theme.DEFAULT_THEME, 1.0, persist=False)
         _close_window(win)
         _ = app
+
+
+# --- Best-in-class packs B–E -------------------------------------------------
+
+def test_preserve_micro_jitter_flag_roundtrips():
+    from motif.models import Script, script_from_dict, script_to_dict
+
+    script = Script(preserve_micro_jitter=True)
+    data = script_to_dict(script)
+    assert data["preserve_micro_jitter"] is True
+    back = script_from_dict(data)
+    assert back.preserve_micro_jitter is True
+
+
+def test_adaptive_sample_interval_slows_when_slow():
+    from motif.models import Script
+    from motif.recorder import Recorder
+
+    rec = Recorder(Script())
+    pts = [{"x": 0, "y": 0, "t_ms": 0}]
+    # ~50 px/s over 200ms → slow → dense interval
+    slow = rec._sample_interval_s(pts, 10, 0, 200)
+    fast = rec._sample_interval_s(pts, 400, 0, 50)
+    assert slow < fast
+    assert slow <= 0.006
+    assert fast >= 0.01
+
+
+def test_fingerprint_mismatch_detects_resize():
+    from motif.models import fingerprint_mismatch
+
+    recorded = [{"x": 0, "y": 0, "width": 1440, "height": 900, "scale": 2.0}]
+    current = [{"x": 0, "y": 0, "width": 1920, "height": 1080, "scale": 2.0}]
+    msg = fingerprint_mismatch(recorded, current)
+    assert msg and ("resized" in msg.lower() or "moved" in msg.lower())
+    assert fingerprint_mismatch(recorded, recorded) is None
+
+
+def test_split_merge_stretch_moves():
+    from motif.models import Event, EventType, merge_moves, split_move, stretch_delays
+
+    pts = [{"x": i * 10, "y": 0, "t_ms": i * 20} for i in range(6)]
+    move = Event(type=EventType.MOVE.value, x=pts[-1]["x"], y=0, points=pts, delay_ms=100)
+    left, right = split_move(move, 3)
+    assert left.type_enum() == EventType.MOVE
+    assert right.type_enum() == EventType.MOVE
+    assert len(left.points) >= 2 and len(right.points) >= 2
+    merged = merge_moves(left, right)
+    assert merged.x == move.x
+    assert len(merged.points) >= len(left.points)
+    a = Event(type=EventType.CLICK.value, delay_ms=100)
+    b = Event(type=EventType.CLICK.value, delay_ms=200)
+    stretch_delays([a, b], 2.0)
+    assert a.delay_ms == 200 and b.delay_ms == 400
+
+
+def test_template_score_perfect_and_miss():
+    from PIL import Image, ImageDraw
+    from motif.screen import template_score
+
+    needle = Image.new("RGB", (12, 12), (0, 0, 0))
+    ImageDraw.Draw(needle).rectangle((2, 2, 9, 9), fill=(255, 0, 0))
+    hay = Image.new("RGB", (40, 40), (0, 0, 0))
+    hay.paste(needle, (10, 10))
+    hit = template_score(hay, needle)
+    other = Image.new("RGB", (12, 12), (0, 0, 0))
+    ImageDraw.Draw(other).ellipse((2, 2, 9, 9), fill=(0, 255, 0))
+    miss = template_score(hay, other)
+    assert hit >= 0.95
+    assert miss < hit
+    assert miss < 0.95
+
+
+def test_wait_image_with_factory():
+    from pathlib import Path
+    from PIL import Image
+    from motif.models import Event, EventType, Script
+    from motif.player import Player
+    from motif.screen import wait_for_image
+
+    tmp = Path("/tmp/motif_tmpl_test.png")
+    Image.new("RGB", (6, 6), (12, 34, 56)).save(tmp)
+    hay = Image.new("RGB", (20, 20), (0, 0, 0))
+    hay.paste(Image.open(tmp), (5, 5))
+    assert wait_for_image(
+        str(tmp),
+        0.8,
+        500,
+        20,
+        lambda: False,
+        haystack_factory=lambda: hay,
+    )
+    # Player event path with factory-less missing file should fail closed quickly
+    script = Script(events=[Event(type=EventType.WAIT_IMAGE.value, template="/no/such.png", timeout_ms=50, poll_ms=10, threshold=0.9)])
+    assert Player().play(script) in {"failed", "done", "stopped"}

@@ -67,6 +67,7 @@ INSPECTOR_GROUPS: dict[EventType, frozenset[str]] = {
     EventType.WAIT: frozenset(),
     EventType.WAIT_PIXEL: frozenset({"pos", "pixel"}),
     EventType.WAIT_PIXEL_CHANGE: frozenset({"pos", "pixel"}),
+    EventType.WAIT_IMAGE: frozenset({"pos", "pixel", "image"}),
     EventType.GO_ORIGIN: frozenset({"motion"}),
     EventType.COMMENT: frozenset(),
     EventType.SWIPE: frozenset({"swipe"}),
@@ -982,6 +983,9 @@ class Inspector(QWidget):
         self.pressed.addItems(["down", "up"])
         self.key = QLineEdit()
         self.color = QLineEdit("#34C759")
+        self.template_edit = QLineEdit()
+        self.template_edit.setPlaceholderText("Path to template image…")
+        describe(self.template_edit, "Template image", "PNG/JPEG Motif waits to appear on screen.")
         # "Swatch" named the decoration, not the action.
         self.pick_color = QPushButton("Colour…")
         apply_button_kind(self.pick_color, "ghost")
@@ -1048,6 +1052,7 @@ class Inspector(QWidget):
 
         self.pixel_box, pixel_form = section_box("PIXEL")
         pixel_form.addRow("Colour", self.color_wrap)
+        pixel_form.addRow("Template", self.template_edit)
         pixel_form.addRow("Tolerance", self.tolerance)
         pixel_form.addRow(self.match_label, self.match)
         pixel_form.addRow("Timeout", self.timeout)
@@ -1109,11 +1114,14 @@ class Inspector(QWidget):
         self.gap.setSuffix(" ms")
         self.return_origin = QCheckBox("Return to zero ground after each cycle")
         self.park = QCheckBox("Park at origin before each cycle")
+        self.preserve_jitter = QCheckBox("Preserve micro-jitter while recording")
+        describe(self.preserve_jitter, "Preserve micro-jitter", "Keep tiny mouse tremors instead of deduping sub-3px samples.")
         loop_form.addRow("Mode", self.play_mode)
         loop_form.addRow("Cycles", self.loops)
         loop_form.addRow("Gap", self.gap)
         loop_form.addRow(self.return_origin)
         loop_form.addRow(self.park)
+        loop_form.addRow(self.preserve_jitter)
         loop_form.addRow(
             hint_label(
                 "Recorded origin uses the same global coordinates as capture — clicks stay on that display even if Motif moves. "
@@ -1189,6 +1197,7 @@ class Inspector(QWidget):
             self.gap,
             self.return_origin,
             self.park,
+            self.preserve_jitter,
             self.preset,
             self.speed,
             self.human_path,
@@ -1292,6 +1301,7 @@ class Inspector(QWidget):
         self.gap.setValue(script.loop.gap_ms)
         self.return_origin.setChecked(script.loop.return_to_origin)
         self.park.setChecked(script.loop.park_before_cycle)
+        self.preserve_jitter.setChecked(bool(script.preserve_micro_jitter))
         self.preset.setCurrentText(script.humanize.preset)
         self.speed.setValue(float(script.humanize.speed))
         self.human_path.setCurrentText(script.humanize.path)
@@ -1313,6 +1323,8 @@ class Inspector(QWidget):
         self.pressed.setCurrentText("down" if event.pressed else "up")
         self.key.setText(event.key)
         self.color.setText(event.color)
+        self.template_edit.setText(event.template)
+        self.template_edit.setVisible(event.type_enum() == EventType.WAIT_IMAGE)
         self.tolerance.setValue(event.tolerance)
         self.match.setCurrentText(event.match)
         self.timeout.setValue(event.timeout_ms)
@@ -1354,6 +1366,9 @@ class Inspector(QWidget):
             if self.active.type_enum() != EventType.SWIPE:
                 self.active.key = self.key.text()
             self.active.color = self.color.text()
+            if self.active.type_enum() == EventType.WAIT_IMAGE:
+                self.active.template = self.template_edit.text().strip()
+                self.active.threshold = max(0.05, min(1.0, self.tolerance.value() / 100.0))
             self.active.tolerance = self.tolerance.value()
             self.active.match = self.match.currentText()
             self.active.timeout_ms = self.timeout.value()
@@ -1365,6 +1380,7 @@ class Inspector(QWidget):
         self.script.loop.gap_ms = self.gap.value()
         self.script.loop.return_to_origin = self.return_origin.isChecked()
         self.script.loop.park_before_cycle = self.park.isChecked()
+        self.script.preserve_micro_jitter = self.preserve_jitter.isChecked()
         preset = self.preset.currentText()
         self.script.humanize.speed = float(self.speed.value())
         if preset != self.script.humanize.preset:
@@ -1418,6 +1434,12 @@ def add_event_of_type(kind: EventType) -> Event:
     event = Event(type=kind.value, name=EVENT_LABELS.get(kind, kind.value.replace("_", " ").title()))
     if kind == EventType.WAIT:
         event.delay_ms = 250
+    if kind == EventType.WAIT_IMAGE:
+        event.timeout_ms = 10000
+        event.poll_ms = 80
+        event.threshold = 0.82
+        event.tolerance = 82
+        event.template = ""
     if kind == EventType.WAIT_PIXEL:
         event.color = "#34C759"
         event.match = "is"

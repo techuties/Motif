@@ -6,6 +6,7 @@ them to on_event / on_hotkey; the GUI marshals those onto the main thread.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from collections.abc import Callable
@@ -37,8 +38,13 @@ from motif.macos import (
     prepare_input_hooks,
 )
 from motif.models import (
+    MOVE_DEDUPE_PX,
     MOVE_IDLE_FLUSH_S,
+    MOVE_SAMPLE_FAST_S,
+    MOVE_SAMPLE_SLOW_S,
+    MOVE_SLOW_VELOCITY,
     SWIPE_IGNORE_MOVES_S,
+    fingerprint_from_displays,
     Event,
     EventType,
     Script,
@@ -119,6 +125,15 @@ class Recorder:
             self._skip_exit_release = False
             self._ignore_moves_until = 0.0
             self._raw = []
+        try:
+            from motif.screen import current_displays
+
+            # Prefer layout already pushed by the UI; else leave prior fingerprint.
+            current = current_displays()
+            if current:
+                self.script.displays = fingerprint_from_displays(current)
+        except Exception:
+            pass
         if sys.platform == "darwin":
             prepare_input_hooks()
             self._swipe = SwipeCapture(self._on_swipe)
@@ -355,6 +370,18 @@ class Recorder:
         self._emit(event)
         self._hold_moves()
 
+    def _sample_interval_s(self, pts: list, rx: int, ry: int, now_ms: int) -> float:
+        """Faster sampling when the cursor slows (near targets / fine motion)."""
+        if not pts:
+            return MOVE_SAMPLE_FAST_S
+        last = pts[-1]
+        dt = max(0.001, (now_ms - int(last.get("t_ms") or 0)) / 1000.0)
+        dist = math.hypot(rx - int(last["x"]), ry - int(last["y"]))
+        velocity = dist / dt
+        if velocity <= MOVE_SLOW_VELOCITY:
+            return MOVE_SAMPLE_SLOW_S
+        return MOVE_SAMPLE_FAST_S
+
     def _on_move(self, x: float, y: float) -> None:
         if not self._recording:
             return
@@ -365,7 +392,12 @@ class Recorder:
         now = time.monotonic()
         with self._lock:
             held = now < self._ignore_moves_until
-        if now - self._last_move_at < 0.012:
+            pts_snapshot = list(self._path)
+        # Adaptive throttle: denser when slow, baseline when fast.
+        rx_probe, ry_probe = self._rel(ix, iy) if not held else (0, 0)
+        now_ms_probe = self._elapsed()
+        min_dt = self._sample_interval_s(pts_snapshot, rx_probe, ry_probe, now_ms_probe) if not held else MOVE_SAMPLE_FAST_S
+        if now - self._last_move_at < min_dt:
             return
         self._last_move_at = now
         if held:
@@ -373,6 +405,7 @@ class Recorder:
             return
         flush_jump = False
         flush_idle = False
+        dedupe = 0 if self.script.preserve_micro_jitter else MOVE_DEDUPE_PX
         with self._lock:
             pts = self._path
             rx, ry = self._rel(ix, iy)
@@ -381,7 +414,7 @@ class Recorder:
                 last = pts[-1]
                 if now_ms - int(last.get("t_ms") or 0) >= int(MOVE_IDLE_FLUSH_S * 1000):
                     flush_idle = True
-                elif abs(last["x"] - rx) < 3 and abs(last["y"] - ry) < 3:
+                elif dedupe and abs(last["x"] - rx) < dedupe and abs(last["y"] - ry) < dedupe:
                     return
                 elif is_space_jump(last["x"], last["y"], rx, ry):
                     flush_jump = True

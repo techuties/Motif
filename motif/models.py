@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
@@ -17,6 +18,7 @@ class EventType(str, Enum):
     WAIT = "wait"
     WAIT_PIXEL = "wait_pixel"
     WAIT_PIXEL_CHANGE = "wait_pixel_change"
+    WAIT_IMAGE = "wait_image"
     GO_ORIGIN = "go_origin"
     COMMENT = "comment"
     SWIPE = "swipe"
@@ -58,6 +60,7 @@ EVENT_LABELS = {
     EventType.WAIT: "Wait",
     EventType.WAIT_PIXEL: "When colour",
     EventType.WAIT_PIXEL_CHANGE: "When colour changes",
+    EventType.WAIT_IMAGE: "When image",
     EventType.GO_ORIGIN: "Go to origin",
     EventType.COMMENT: "Note",
     EventType.SWIPE: "Space",
@@ -191,6 +194,8 @@ class Event:
     direction: str = ""
     app: str = ""
     bundle_id: str = ""
+    template: str = ""  # path to template image for wait_image
+    threshold: float = 0.82  # template match score 0..1
 
     def type_enum(self) -> EventType:
         try:
@@ -234,6 +239,9 @@ class Event:
             return f"Pixel {self.x}, {self.y} {verb} {self.color}"
         if kind == EventType.WAIT_PIXEL_CHANGE:
             return f"Pixel {self.x}, {self.y} leaves {self.color}"
+        if kind == EventType.WAIT_IMAGE:
+            name = Path(self.template).name if self.template else "template"
+            return f"Find {name} ≥ {self.threshold:.0%}"
         if kind == EventType.GO_ORIGIN:
             return "Return to zero ground"
         if kind == EventType.COMMENT:
@@ -247,6 +255,7 @@ class Event:
             EventType.SCROLL,
             EventType.WAIT_PIXEL,
             EventType.WAIT_PIXEL_CHANGE,
+            EventType.WAIT_IMAGE,
         }
 
     def clone(self) -> Event:
@@ -265,6 +274,8 @@ class Script:
     humanize: HumanizeSettings = field(default_factory=HumanizeSettings)
     loop: LoopSettings = field(default_factory=LoopSettings)
     notes: str = ""
+    preserve_micro_jitter: bool = False
+    displays: list[dict[str, Any]] = field(default_factory=list)
 
     def enabled_events(self) -> list[Event]:
         return [e for e in self.events if e.enabled]
@@ -334,6 +345,11 @@ SPACE_JUMP_PX = 480
 SWIPE_IGNORE_MOVES_S = 0.12
 # Parked cursor: flush the pending destination as one MOVE, then start a new one.
 MOVE_IDLE_FLUSH_S = 0.45
+MOVE_SAMPLE_FAST_S = 0.012
+MOVE_SAMPLE_SLOW_S = 0.005
+MOVE_SLOW_VELOCITY = 380.0  # px/s — below this, sample denser
+MOVE_DEDUPE_PX = 3
+
 # Replay walks recorded samples when a MOVE has at least this many points.
 # Two-point (start+dest) files interpolate so the cursor still travels.
 WALK_MIN_POINTS = 3
@@ -535,6 +551,8 @@ def script_to_dict(script: Script) -> dict[str, Any]:
         "humanize": asdict(script.humanize),
         "loop": asdict(script.loop),
         "notes": script.notes,
+        "preserve_micro_jitter": bool(script.preserve_micro_jitter),
+        "displays": list(script.displays or []),
         "kind": "motif",
     }
 
@@ -790,6 +808,8 @@ def script_from_dict(data: dict[str, Any]) -> Script:
         humanize=humanize_from_dict(data.get("humanize")),
         loop=loop_from_dict(data.get("loop")),
         notes=str(data.get("notes") or ""),
+        preserve_micro_jitter=bool(data.get("preserve_micro_jitter")),
+        displays=[dict(d) for d in (data.get("displays") or []) if isinstance(d, dict)],
     )
 
 
@@ -848,3 +868,130 @@ def screen_pos(script: Script, x: int, y: int, cursor: tuple[int, int] | None = 
     if mode == PlayMode.FROM_CURSOR.value and cursor is not None:
         return cursor[0] + x, cursor[1] + y
     return script.origin_x + x, script.origin_y + y
+
+
+def split_move(event: Event, at_index: int) -> tuple[Event, Event]:
+    """Split a MOVE polyline into two MOVEs at at_index (second starts there)."""
+    if event.type_enum() != EventType.MOVE:
+        raise ValueError("split_move only applies to MOVE events")
+    pts = list(event.points or [])
+    if len(pts) < 2:
+        raise ValueError("need at least two points to split")
+    idx = max(1, min(int(at_index), len(pts) - 1))
+    left = pts[: idx + 1]
+    right = pts[idx:]
+    a = event.clone()
+    b = event.clone()
+    a.points = _renorm_points(left)
+    a.x, a.y = int(left[-1]["x"]), int(left[-1]["y"])
+    a.travel_ms = move_travel_ms(left)
+    a.name = event.name or "Move"
+    b.points = _renorm_points(right)
+    b.x, b.y = int(right[-1]["x"]), int(right[-1]["y"])
+    b.travel_ms = move_travel_ms(right)
+    b.delay_ms = 0
+    b.name = event.name or "Move"
+    return a, b
+
+
+def merge_moves(first: Event, second: Event) -> Event:
+    """Merge two consecutive MOVE events into one polyline."""
+    if first.type_enum() != EventType.MOVE or second.type_enum() != EventType.MOVE:
+        raise ValueError("merge_moves only applies to MOVE events")
+    a = list(first.points or [])
+    b = list(second.points or [])
+    if not a and first.has_position():
+        a = [{"x": first.x, "y": first.y, "t_ms": 0}]
+    if not b and second.has_position():
+        b = [{"x": second.x, "y": second.y, "t_ms": 0}]
+    # shift b times to continue after a
+    base = int(a[-1].get("t_ms") or 0) if a else 0
+    gap = max(0, int(second.delay_ms or 0))
+    merged = list(a)
+    for p in b:
+        merged.append(
+            {
+                "x": int(p["x"]),
+                "y": int(p["y"]),
+                "t_ms": base + gap + int(p.get("t_ms") or 0),
+            }
+        )
+    out = first.clone()
+    out.points = _renorm_points(merged)
+    out.x, out.y = int(merged[-1]["x"]), int(merged[-1]["y"])
+    out.travel_ms = move_travel_ms(merged)
+    return out
+
+
+def stretch_delays(events: list[Event], factor: float) -> None:
+    """Scale delay_ms on each event in place (factor 1.0 = unchanged)."""
+    scale = max(0.05, float(factor))
+    for event in events:
+        event.delay_ms = max(0, int(round(event.delay_ms * scale)))
+
+
+def displays_fingerprint(displays: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Normalize a fingerprint list for Script.displays."""
+    out: list[dict[str, Any]] = []
+    for d in displays or []:
+        if not isinstance(d, dict):
+            continue
+        out.append(
+            {
+                "x": _as_int(d.get("x")),
+                "y": _as_int(d.get("y")),
+                "width": _as_int(d.get("width") or d.get("w")),
+                "height": _as_int(d.get("height") or d.get("h")),
+                "scale": float(d.get("scale") or 1.0),
+                "name": str(d.get("name") or ""),
+            }
+        )
+    return out
+
+
+def fingerprint_from_displays(displays) -> list[dict[str, Any]]:
+    """Build fingerprint dicts from motif.screen.Display objects or dicts."""
+    rows: list[dict[str, Any]] = []
+    for d in displays or []:
+        if isinstance(d, dict):
+            rows.append(d)
+            continue
+        rows.append(
+            {
+                "x": int(getattr(d, "x", 0)),
+                "y": int(getattr(d, "y", 0)),
+                "width": int(getattr(d, "width", 0)),
+                "height": int(getattr(d, "height", 0)),
+                "scale": float(getattr(d, "scale", 1.0) or 1.0),
+                "name": str(getattr(d, "name", "") or ""),
+            }
+        )
+    return displays_fingerprint(rows)
+
+
+def fingerprint_mismatch(
+    recorded: list[dict[str, Any]] | None,
+    current: list[dict[str, Any]] | None,
+    *,
+    px_slop: int = 8,
+) -> str | None:
+    """Human warning when layout differs, or None when OK / nothing recorded."""
+    a = displays_fingerprint(recorded)
+    b = displays_fingerprint(current)
+    if not a:
+        return None
+    if not b:
+        return "Display layout unknown now; motif was recorded on a known layout."
+    if len(a) != len(b):
+        return f"Display count changed ({len(a)} recorded → {len(b)} now)."
+    for i, (ra, rb) in enumerate(zip(a, b)):
+        for key in ("x", "y", "width", "height"):
+            if abs(int(ra.get(key) or 0) - int(rb.get(key) or 0)) > px_slop:
+                return (
+                    f"Display {i + 1} moved or resized "
+                    f"({ra.get('width')}×{ra.get('height')} @ {ra.get('x')},{ra.get('y')} → "
+                    f"{rb.get('width')}×{rb.get('height')} @ {rb.get('x')},{rb.get('y')})."
+                )
+        if abs(float(ra.get("scale") or 1) - float(rb.get("scale") or 1)) > 0.05:
+            return f"Display {i + 1} scale changed."
+    return None

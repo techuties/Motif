@@ -39,7 +39,7 @@ from motif.models import (
     screen_pos,
     should_auto_align,
 )
-from motif.screen import grab_pixel, wait_for_pixel, wait_for_pixel_change
+from motif.screen import grab_pixel, wait_for_image, wait_for_pixel, wait_for_pixel_change
 
 BUTTONS = {
     "left": Button.left,
@@ -271,6 +271,26 @@ class Player:
                 event.match,
                 event.poll_ms,
                 self.stop_flag.is_set,
+            )
+            return ok and not self.stop_flag.is_set()
+
+
+        if kind == EventType.WAIT_IMAGE:
+            ax, ay = self._abs(script, event.x, event.y, cursor0)
+            # width/height encoded in dx/dy when set; else full search region fallback
+            w = int(event.dx) if event.dx else 0
+            h = int(event.dy) if event.dy else 0
+            threshold = float(event.threshold) if event.threshold else max(0.5, (event.tolerance or 82) / 100.0)
+            ok = wait_for_image(
+                event.template,
+                threshold,
+                event.timeout_ms,
+                event.poll_ms,
+                self.stop_flag.is_set,
+                logical_x=ax,
+                logical_y=ay,
+                width=w,
+                height=h,
             )
             return ok and not self.stop_flag.is_set()
 

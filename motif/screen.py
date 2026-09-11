@@ -313,3 +313,111 @@ def wait_for_pixel_change(
         should_stop,
         scale,
     )
+
+
+def grab_region(logical_x: int, logical_y: int, width: int, height: int, scale: float | None = None) -> Image.Image:
+    """Grab a logical rectangle as an RGB PIL image."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    with mss.mss() as sct:
+        x0, y0 = logical_to_physical(logical_x, logical_y, scale, monitors=sct.monitors)
+        x1, y1 = logical_to_physical(
+            logical_x + width - 1, logical_y + height - 1, scale, monitors=sct.monitors
+        )
+        left = min(x0, x1)
+        top = min(y0, y1)
+        w = max(1, abs(x1 - x0) + 1)
+        h = max(1, abs(y1 - y0) + 1)
+        grab = sct.grab({"left": left, "top": top, "width": w, "height": h})
+        return Image.frombytes("RGB", grab.size, grab.rgb)
+
+
+def _pixels(img: Image.Image) -> list[int]:
+    if hasattr(img, "get_flattened_data"):
+        return list(img.get_flattened_data())
+    return list(img.getdata())
+
+
+def template_score(haystack: Image.Image, needle: Image.Image) -> float:
+    """Return best score in 0..1 via mean absolute difference (1 = identical)."""
+    hay = haystack.convert("L")
+    need = needle.convert("L")
+    if need.width > hay.width or need.height > hay.height:
+        return 0.0
+    best = 0.0
+    hw, hh = hay.size
+    nw, nh = need.size
+    need_px = _pixels(need)
+    step_y = max(1, nh // 6)
+    step_x = max(1, nw // 6)
+    denom = float(len(need_px) * 255.0) or 1.0
+    for y in range(0, hh - nh + 1, step_y):
+        for x in range(0, hw - nw + 1, step_x):
+            crop = _pixels(hay.crop((x, y, x + nw, y + nh)))
+            diff = sum(abs(a - b) for a, b in zip(crop, need_px)) / denom
+            best = max(best, 1.0 - diff)
+    return best
+
+
+def match_template_file(
+    template_path: str,
+    *,
+    logical_x: int = 0,
+    logical_y: int = 0,
+    width: int = 0,
+    height: int = 0,
+    haystack: Image.Image | None = None,
+) -> float:
+    """Score template against a screen region or provided haystack image."""
+    from pathlib import Path
+
+    path = Path(template_path)
+    if not path.is_file():
+        return 0.0
+    needle = Image.open(path).convert("RGB")
+    if haystack is None:
+        if width <= 0 or height <= 0:
+            # full virtual desktop grab is expensive; require region or haystack in tests
+            displays = current_displays()
+            vx, vy, vw, vh = virtual_rect(displays)
+            logical_x, logical_y, width, height = vx, vy, vw, vh
+        haystack = grab_region(logical_x, logical_y, width, height)
+    return template_score(haystack, needle)
+
+
+def wait_for_image(
+    template_path: str,
+    tolerance_or_threshold: float,
+    timeout_ms: int,
+    poll_ms: int,
+    should_stop,
+    *,
+    logical_x: int = 0,
+    logical_y: int = 0,
+    width: int = 0,
+    height: int = 0,
+    haystack_factory=None,
+) -> bool:
+    """Poll until template score >= threshold (0..1) or tolerance/100 if >1."""
+    threshold = float(tolerance_or_threshold)
+    if threshold > 1.0:
+        threshold = threshold / 100.0
+    threshold = max(0.05, min(1.0, threshold))
+    deadline = time.monotonic() + max(timeout_ms, 1) / 1000.0
+    interval = max(poll_ms, 10) / 1000.0
+    while time.monotonic() < deadline:
+        if should_stop():
+            return False
+        hay = haystack_factory() if haystack_factory else None
+        score = match_template_file(
+            template_path,
+            logical_x=logical_x,
+            logical_y=logical_y,
+            width=width,
+            height=height,
+            haystack=hay,
+        )
+        if score >= threshold:
+            return True
+        time.sleep(interval)
+    return False
