@@ -1,6 +1,6 @@
 # Motif — mouse & keyboard recorder, auto clicker, and macro recorder
 
-Motif records, edits, and replays mouse movement, clicks, and keystrokes. **Tested and proven on macOS.** Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
+Motif records, edits, and replays mouse movement, clicks, and keystrokes. **Tested on macOS and Linux.** Capture a take, edit the event list, replay it. Visual timeline, colour-pixel triggers, looping, and humanized playback — TinyTask-style record and replay, not a Keyboard Maestro clone.
 
 Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
@@ -32,7 +32,7 @@ Day and High Contrast stills: [`motif-day.png`](docs/media/motif-day.png) · [`m
 python3 start.py
 ```
 
-`start.cmd` and a Linux launcher exist; the code can start elsewhere, but it is not tested there.
+`start.cmd` and a Linux launcher exist. **macOS and Linux are both smoke-tested** (GUI + pytest). macOS remains the primary target for Accessibility, Spaces, and `Motif.app` packaging.
 
 Requires **Python 3.11+**. The first run creates `.venv`, installs Motif, and opens the window. After that, the same command just starts. A terminal start on Mac still attributes Accessibility to Terminal/Python — use `Motif.app` for recording.
 
@@ -128,7 +128,7 @@ pip install -e '.[dev]'
 QT_QPA_PLATFORM=offscreen python -m pytest
 ```
 
-macOS remains the proven recorder/replay target; Linux validates install + tests.
+macOS remains the primary recorder/replay target (Accessibility / Spaces / Motif.app); Linux is smoke-tested for install, GUI launch, and the full pytest suite.
 
 ## Permissions
 
