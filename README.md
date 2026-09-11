@@ -1,10 +1,19 @@
 # Motif — mouse & keyboard recorder, auto clicker, and macro recorder
 
+<p align="center">
+  <img src="docs/media/motif-icon.png" alt="Motif icon" width="128" height="128" />
+</p>
+
+
 Motif is a **mouse & keyboard recorder**, auto clicker, and macro tool: record a take, edit the event list, replay it. **Works on macOS, Linux, and Windows** (Python core). macOS and Linux are GUI + pytest smoke-tested; Windows runs via `start.cmd` (portable EXE still forthcoming). Visual timeline, image/colour waits with optional click-on-find, light branches, humanized playback, tray/schedules, and an opt-in local API — TinyTask-style, not a Keyboard Maestro clone.
 
 Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
 ## See it
+
+App icon (dock / tray / window):
+
+![Motif icon](docs/media/motif-icon-64.png)
 
 Night theme with the example motif loaded (transport, path, event list, inspector):
 

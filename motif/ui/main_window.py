@@ -730,6 +730,8 @@ class MainWindow(QMainWindow):
                 f"{start}  ·  F10 replay  ·  {exit_combo_label()} stop{extra}"
             )
         self._hotkeys.start()
+        if self.windowIcon().isNull():
+            self.setWindowIcon(motif_app_icon())
         self._setup_tray()
         self._schedule_timer.start()
         self._sync_ignore_region()
@@ -2222,6 +2224,24 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
+
+def motif_app_icon() -> QIcon:
+    """Load packaging/AppIcon.png for window + tray (bundle icns covers Motif.app dock)."""
+    candidates = [
+        Path(__file__).resolve().parents[2] / "packaging" / "AppIcon.png",
+        Path(__file__).resolve().parents[1] / "packaging" / "AppIcon.png",
+        Path.cwd() / "packaging" / "AppIcon.png",
+    ]
+    icon = QIcon()
+    for path in candidates:
+        if path.is_file():
+            icon = QIcon(str(path))
+            if not icon.isNull():
+                return icon
+    themed = QIcon.fromTheme("input-mouse")
+    return themed if not themed.isNull() else QIcon()
+
+
 def configure_qt() -> None:
     import os
 
@@ -2254,6 +2274,11 @@ def run_app() -> int:
     qss = theme.set_theme(saved.get("theme", theme.DEFAULT_THEME), saved.get("text_scale", 1.0))
     app.setPalette(theme.qt_palette())
     app.setStyleSheet(qss)
+    icon = motif_app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     window = MainWindow()
+    if not icon.isNull():
+        window.setWindowIcon(icon)
     window.show()
     return app.exec()
