@@ -4,6 +4,24 @@ Motif records, edits, and replays mouse movement, clicks, and keystrokes. **Test
 
 Also known as an auto clicker, keyboard recorder, click recorder, mouse macro, or input recorder.
 
+## See it
+
+Night theme with the example motif loaded (transport, path, event list, inspector):
+
+![Motif main window — TechUties Night](docs/media/motif-main.png)
+
+Themes cycle (Night → Day → High Contrast):
+
+![Motif themes](docs/media/motif-themes.gif)
+
+Short preview video: [`docs/media/motif-themes.mp4`](docs/media/motif-themes.mp4)
+
+Transport strip:
+
+![Motif transport](docs/media/motif-transport.png)
+
+Day and High Contrast stills: [`motif-day.png`](docs/media/motif-day.png) · [`motif-high-contrast.png`](docs/media/motif-high-contrast.png)
+
 ## Start
 
 **macOS:** open `Motif.app` (preferred — permissions attach to Motif). If it is missing, run `python3 start.py app` once, then open `Motif.app`. `Motif.command` is a fallback and will open `Motif.app` when it exists.
@@ -95,6 +113,22 @@ The toolbar reads in four zones, separated by hairline rules: **Record · Replay
 - Status is never colour alone — a skipped step says `Off`, and the selected point on a canvas gets a ring, not just a tint.
 
 Colours come from techuties.com: brand navy `#050A1F`, amber `#FF9A1A`, Inter where it is installed.
+
+
+## Linux smoke
+
+On Linux (CI or a second machine), Motif’s pytest UI cases need:
+
+```bash
+sudo apt-get install -y python3-dev build-essential libegl1 libgl1 \
+  libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+  libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'
+QT_QPA_PLATFORM=offscreen python -m pytest
+```
+
+macOS remains the proven recorder/replay target; Linux validates install + tests.
 
 ## Permissions
 
